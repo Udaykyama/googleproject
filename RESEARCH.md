@@ -298,7 +298,7 @@ that Google is actively trying to fix, understand how many users are affected,
 and check what Google's own job postings say about how the company staffs
 people to solve it.
 
-## The problem
+### The problem
 
 Google Search, Google Maps and Google Business Profiles rely heavily on
 user-generated reviews to help people choose businesses, products and
@@ -334,7 +334,7 @@ fight fake Business Profiles", Google's public-policy blog post on legal
 action against fake review scams, and third-party analyses summarizing UK
 CMA findings on fake review prevalence.
 
-## Who is affected
+### Who is affected
 
 - **Consumers/users**: hundreds of millions of people rely on Google Maps
   and Search reviews to make everyday purchasing decisions; fake reviews
@@ -345,7 +345,7 @@ CMA findings on fake review prevalence.
 - **Platform trust**: at scale (hundreds of millions of reviews touched
   per year), unresolved fake reviews erode trust in the platform itself.
 
-## How Google staffs the fight (job postings)
+### How Google staffs the fight (job postings)
 
 Reviewing Google's public job postings for roles such as *Trust & Safety
 Analyst*, *Abuse Operations Analyst*, and *Content Policy Specialist* shows
@@ -366,7 +366,7 @@ a consistent set of responsibilities that map directly to this problem:
 5. **Community support** — help users and business owners understand how to
    report abuse and what happens after a report is filed.
 
-## Why this project
+### Why this project
 
 Given the scale (hundreds of millions of reviews affected per year) and the
 fact that this is a problem Google is *actively, publicly* trying to solve
