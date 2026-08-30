@@ -263,8 +263,6 @@ MIT.
 
 ---
 
-## Fake Review Detector
-
 ## Fake Review Detector — a showcase of a problem Google is fixing
 
 Google has publicly reported removing/blocking **240+ million fake or
