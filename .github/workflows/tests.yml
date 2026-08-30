@@ -46,7 +46,7 @@ jobs:
         # site-packages disabled proves it, rather than trusting the promise.
         run: |
           python -X importtime -S -c "
-          import sys, pathlib
+          import sys
           sys.path[:0] = ['.', 'src']
           import fake_review_detector, inboxready
           print('imported with site-packages disabled:', fake_review_detector.__name__, inboxready.__name__)

@@ -285,7 +285,7 @@ def test_every_objective_runs_and_picks_a_valid_threshold():
 def test_precision_at_recall_respects_its_recall_floor():
     items = _synthetic(900)
     strict = calibrate(items, Policy(), objective="precision_at_recall", recall_floor=0.99)
-    assert strict.train.recall >= 0.99 or strict.threshold == 0
+    assert strict.train.recall >= 0.99
 
 
 def test_unknown_objective_is_rejected():
