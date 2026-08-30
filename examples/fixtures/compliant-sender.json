@@ -1,0 +1,46 @@
+{
+  "_comment": [
+    "A sender configured the way Google's guidelines ask for.",
+    "Run: inboxready mail.example-good.test --fixture examples/fixtures/compliant-sender.json",
+    "     --selector google --ip 198.51.100.25"
+  ],
+  "dns": {
+    "mail.example-good.test": {
+      "TXT": ["v=spf1 include:_spf.esp.test -all"],
+      "MX": ["10 mx1.example-good.test"],
+      "A": ["198.51.100.25"]
+    },
+    "example-good.test": {
+      "MX": ["10 mx1.example-good.test"],
+      "A": ["198.51.100.25"]
+    },
+    "_spf.esp.test": {
+      "TXT": ["v=spf1 ip4:198.51.100.0/24 ip6:2001:db8::/32 -all"]
+    },
+    "mx1.example-good.test": {
+      "A": ["198.51.100.30"]
+    },
+    "google._domainkey.mail.example-good.test": {
+      "TXT": [
+        "v=DKIM1; k=rsa; h=sha256; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1dBl3ytFZ1BtjE7FmFj9XEPQOzX2imP81sRX7Ce+ixvp0OPlMa7ZRtbZurG1NPIES1y6IXrQTW2d2DGI1mQCtItQ8X6FHppZC58TQ1TWcTYmzX8tR5WQuHH7opj/t9njR0y+u5ZvJchbZuPwH9nz8pWRqOOhhRJ5SnP0hEK5sgn1ed7CSymJ4O1/xOGYnpXG8TM621wHgKOBiK1jL9orxmf2NKUK3XvXGRA8EUUfViZXe9wWBMDODJP9aGqfOabXEdL5j4Nut6U1lxfvOGzX+My5I+A/tWKAB/0TsyiwO1n9Fghm2wIHZNVNzOAXCUbtvunN/24SjhU9WCHTrVtH7QIDAQAB"
+      ]
+    },
+    "_dmarc.mail.example-good.test": {
+      "TXT": [
+        "v=DMARC1; p=reject; rua=mailto:dmarc@example-good.test; ruf=mailto:dmarc@example-good.test; fo=1; pct=100"
+      ]
+    },
+    "_mta-sts.mail.example-good.test": {
+      "TXT": ["v=STSv1; id=20260115T120000"]
+    },
+    "_smtp._tls.mail.example-good.test": {
+      "TXT": ["v=TLSRPTv1; rua=mailto:tls-reports@example-good.test"]
+    },
+    "25.100.51.198.in-addr.arpa": {
+      "PTR": ["mta1.example-good.test"]
+    },
+    "mta1.example-good.test": {
+      "A": ["198.51.100.25"]
+    }
+  }
+}

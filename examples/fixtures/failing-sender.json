@@ -1,0 +1,53 @@
+{
+  "_comment": [
+    "A deliberately broken bulk sender, used to demonstrate InboxReady offline.",
+    "Every failure here is one Google's November 2025 enforcement acts on.",
+    "Run: inboxready deals.example-shop.test --fixture examples/fixtures/failing-sender.json",
+    "     --selector google --selector legacy --ip 203.0.113.25 --ip 203.0.113.26"
+  ],
+  "dns": {
+    "deals.example-shop.test": {
+      "TXT": [
+        "v=spf1 a mx ptr include:c1.esp.test include:c2.esp.test include:c3.esp.test include:_spf.legacy.test +all"
+      ],
+      "A": ["203.0.113.25"]
+    },
+    "example-shop.test": {
+      "A": ["203.0.113.25"]
+    },
+    "c1.esp.test": {
+      "TXT": ["v=spf1 a mx include:d1.esp.test ~all"]
+    },
+    "c2.esp.test": {
+      "TXT": ["v=spf1 a ~all"]
+    },
+    "c3.esp.test": {
+      "TXT": ["v=spf1 include:d2.esp.test ~all"]
+    },
+    "d1.esp.test": {
+      "TXT": ["v=spf1 ip4:198.51.100.0/24 ~all"]
+    },
+    "d2.esp.test": {
+      "TXT": ["v=spf1 a ~all"]
+    },
+    "google._domainkey.deals.example-shop.test": {
+      "TXT": ["v=DKIM1; k=rsa; p="]
+    },
+    "legacy._domainkey.deals.example-shop.test": {
+      "TXT": [
+        "v=DKIM1; k=rsa; t=y; h=sha1; p=MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAKvFQBZIt8qYsNLCE4zBJ22VEY3dsDEScNAs0fBmn+rgmOqu0s8VOEADqNjNzr/Zr5IVeconipaJdmkL+i6qGiUCAwEAAQ=="
+      ]
+    },
+    "_dmarc.deals.example-shop.test": {
+      "TXT": [
+        "v=DMARC1; p=none; pct=50; rua=mailto:reports@dmarc-vendor.test; adkim=r; aspf=r; rf=afrf; unknowntag=1"
+      ]
+    },
+    "25.113.0.203.in-addr.arpa": {
+      "PTR": ["mail.example-shop.test"]
+    },
+    "mail.example-shop.test": {
+      "A": ["198.51.100.9"]
+    }
+  }
+}
