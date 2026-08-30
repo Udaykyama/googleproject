@@ -14,7 +14,7 @@ sides of every comparison are normalised identically.
 from __future__ import annotations
 
 from .models import Review, SignalHit
-from .normalize import matching_key, mixed_script_words
+from .normalize import condensed_key, matching_key, mixed_script_words
 from .policy import Policy
 
 __all__ = [
@@ -43,6 +43,12 @@ _PHRASE_KEYS: dict[str, str] = {
     phrase: matching_key(phrase) for phrase in GENERIC_PHRASES
 }
 
+#: The same phrases with spaces removed, for text whose word boundaries were
+#: destroyed by spacing every letter out.
+_PHRASE_KEYS_CONDENSED: dict[str, str] = {
+    phrase: key.replace(" ", "") for phrase, key in _PHRASE_KEYS.items()
+}
+
 
 def matched_phrases(text: str) -> list[str]:
     """Generic phrases present in ``text``, compared on folded keys."""
@@ -50,10 +56,12 @@ def matched_phrases(text: str) -> list[str]:
     key = matching_key(text)
     if not key:
         return []
+    condensed = condensed_key(text)
     return [
         phrase
         for phrase, phrase_key in _PHRASE_KEYS.items()
-        if phrase_key and phrase_key in key
+        if phrase_key
+        and (phrase_key in key or _PHRASE_KEYS_CONDENSED[phrase] in condensed)
     ]
 
 

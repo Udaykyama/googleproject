@@ -38,6 +38,7 @@ import unicodedata
 __all__ = [
     "normalize_text",
     "matching_key",
+    "condensed_key",
     "fold_homoglyphs",
     "mixed_script_words",
     "strip_invisible",
@@ -188,7 +189,23 @@ def matching_key(text: str) -> str:
     folded = _WHITESPACE_RE.sub(" ", folded).strip()
     # Re-join letters that were spaced out to break up a matched phrase.
     folded = _SPACED_LETTERS_RE.sub(lambda m: m.group(0).replace(" ", ""), folded)
+    # Rejoining can recreate runs the earlier pass could not see, because the
+    # repeated characters were separated by the spacing ("r e c o m m e n d").
+    folded = _RUN_RE.sub(r"\1", folded)
     return _WHITESPACE_RE.sub(" ", folded).strip()
+
+
+def condensed_key(text: str) -> str:
+    """:func:`matching_key` with all spaces removed.
+
+    When every word of a phrase is spaced out ("B-e-s-t p-r-o-d-u-c-t e-v-e-r")
+    the original word boundaries are genuinely unrecoverable, so no amount of
+    re-joining restores "best product ever". Comparing the space-free forms of
+    both sides sidesteps that. Only used as a secondary check, because it can
+    match across word boundaries.
+    """
+
+    return matching_key(text).replace(" ", "")
 
 
 def word_shingles(text: str, size: int = 3) -> set[str]:

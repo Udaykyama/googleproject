@@ -99,6 +99,10 @@ class DuplicateReport:
     mode: str  # "exact" or "lsh"
     candidate_pairs: int
     compared_pairs: int
+    #: True when the per-review partner cap stopped some pairs being recorded.
+    #: The reviews are still reported as duplicates; only the exhaustive list
+    #: of who-matched-whom is incomplete.
+    truncated: bool = False
 
     def ids(self) -> set[str]:
         result: set[str] = set()
@@ -141,6 +145,10 @@ def _exact_candidates(count: int) -> list[tuple[int, int]]:
     return [(i, j) for i in range(count) for j in range(i + 1, count)]
 
 
+#: Largest set of documents compared pairwise inside one LSH bucket.
+_BUCKET_WINDOW = 500
+
+
 def _lsh_candidates(
     keys: Sequence[str], num_perm: int = NUM_PERM, bands: int = BANDS
 ) -> list[tuple[int, int]]:
@@ -174,12 +182,15 @@ def _lsh_candidates(
     for group in list(buckets.values()) + list(degenerate.values()):
         if len(group) < 2:
             continue
-        # A pathological bucket would reintroduce the quadratic blow-up.
-        if len(group) > 500:
-            group = group[:500]
-        for position, left in enumerate(group):
-            for right in group[position + 1 :]:
-                pairs.add((left, right) if left < right else (right, left))
+        # A pathological bucket would reintroduce the quadratic blow-up, so
+        # large buckets are compared in windows. Truncating the bucket instead
+        # would silently drop its later members from detection entirely;
+        # windowing keeps every member in some comparison.
+        for start in range(0, len(group), _BUCKET_WINDOW):
+            window = group[start : start + _BUCKET_WINDOW]
+            for position, left in enumerate(window):
+                for right in window[position + 1 :]:
+                    pairs.add((left, right) if left < right else (right, left))
     return sorted(pairs)
 
 
@@ -188,12 +199,23 @@ def find_duplicates(
     *,
     threshold: float = 0.85,
     exact_max_batch: int = 200,
+    max_partners: int = 25,
 ) -> DuplicateReport:
     """Find near-duplicate reviews in a batch.
 
     Uses exhaustive comparison for batches up to ``exact_max_batch`` and LSH
     blocking above it. ``threshold`` is applied by ``SequenceMatcher`` in both
     modes, so a pair reported in one mode would be reported in the other.
+
+    ``max_partners`` bounds how many duplicate partners are recorded per
+    review. A review bomb of n identical texts genuinely contains n*(n-1)/2
+    duplicate pairs, so enumerating them all is quadratic no matter how the
+    candidates are generated. Detection only needs a few partners per review,
+    so pairs are skipped once a side is at the cap and
+    :attr:`DuplicateReport.truncated` is set. A review with no partner yet is
+    never skipped, so every review that has a true duplicate is still flagged.
+    Both modes apply the cap over the same sorted candidate order, so results
+    stay deterministic.
     """
 
     reviews = list(reviews)
@@ -212,12 +234,24 @@ def find_duplicates(
 
     pairs: list[DuplicatePair] = []
     compared = 0
+    truncated = False
+    partner_count: dict[int, int] = {}
     for left, right in candidates:
         if not texts[left] or not texts[right]:
+            continue
+        left_partners = partner_count.get(left, 0)
+        right_partners = partner_count.get(right, 0)
+        # Stop growing partner lists that are already at the cap. In a dense
+        # cluster the under-cap review still has many other members of the
+        # same cluster to match against, so it is still flagged.
+        if left_partners >= max_partners or right_partners >= max_partners:
+            truncated = True
             continue
         compared += 1
         similarity = _similar(texts[left], texts[right], threshold)
         if similarity is not None:
+            partner_count[left] = partner_count.get(left, 0) + 1
+            partner_count[right] = partner_count.get(right, 0) + 1
             pairs.append(
                 DuplicatePair(
                     left_id=reviews[left].review_id,
@@ -231,4 +265,5 @@ def find_duplicates(
         mode=mode,
         candidate_pairs=len(candidates),
         compared_pairs=compared,
+        truncated=truncated,
     )
