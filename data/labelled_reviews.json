@@ -1,0 +1,422 @@
+[
+  {
+    "review_id": "g01",
+    "author": "marisa_t",
+    "rating": 4,
+    "text": "Battery lasted about six hours of mixed use, which is short of the ten hours advertised but fine for my commute. The hinge feels solid after three months.",
+    "verified_purchase": true,
+    "account_age_days": 820,
+    "date": "2024-05-02",
+    "is_fake": false
+  },
+  {
+    "review_id": "g02",
+    "author": "dpark",
+    "rating": 2,
+    "text": "Arrived with a scratch on the lid. Support replaced it without argument, but the second unit has the same coil whine under load.",
+    "verified_purchase": true,
+    "account_age_days": 1450,
+    "date": "2024-05-03",
+    "is_fake": false
+  },
+  {
+    "review_id": "g03",
+    "author": "helena_v",
+    "rating": 5,
+    "text": "Works great.",
+    "verified_purchase": true,
+    "account_age_days": 2100,
+    "date": "2024-05-04",
+    "is_fake": false
+  },
+  {
+    "review_id": "g04",
+    "author": "tomasz89",
+    "rating": 1,
+    "text": "Broke in a week.",
+    "verified_purchase": true,
+    "account_age_days": 640,
+    "date": "2024-05-04",
+    "is_fake": false
+  },
+  {
+    "review_id": "g05",
+    "author": "nadia_r",
+    "rating": 5,
+    "text": "Отличный товар, доставка заняла три дня, упаковка была повреждена но содержимое целое.",
+    "verified_purchase": true,
+    "account_age_days": 310,
+    "date": "2024-05-05",
+    "is_fake": false
+  },
+  {
+    "review_id": "g06",
+    "author": "kenji_m",
+    "rating": 4,
+    "text": "この製品は思ったより小さいですが、品質は良いです。説明書がわかりにくいのが唯一の不満です。",
+    "verified_purchase": true,
+    "account_age_days": 990,
+    "date": "2024-05-05",
+    "is_fake": false
+  },
+  {
+    "review_id": "g07",
+    "author": "bex_w",
+    "rating": 5,
+    "text": "HONESTLY THE BEST PURCHASE I HAVE MADE ALL YEAR!!! Sorry for the caps, I am just genuinely delighted with how well this fits my desk setup.",
+    "verified_purchase": true,
+    "account_age_days": 1700,
+    "date": "2024-05-06",
+    "is_fake": false
+  },
+  {
+    "review_id": "g08",
+    "author": "arun_p",
+    "rating": 3,
+    "text": "Received this as a gift so I cannot confirm the order, but the sound is muddy below 200Hz and the app crashes on Android 14.",
+    "verified_purchase": false,
+    "account_age_days": 2400,
+    "date": "2024-05-06",
+    "is_fake": false
+  },
+  {
+    "review_id": "g09",
+    "author": "lucia_f",
+    "rating": 5,
+    "text": "Bought this after my old one died. Setup took ten minutes and the app found it immediately. No complaints so far, two weeks in.",
+    "verified_purchase": true,
+    "account_age_days": 2,
+    "date": "2024-05-07",
+    "is_fake": false
+  },
+  {
+    "review_id": "g10",
+    "author": "sam_oduya",
+    "rating": 4,
+    "text": "Good value at this price. The strap is stiff out of the box and takes about a week to soften up, worth knowing before you judge it.",
+    "verified_purchase": true,
+    "account_age_days": 560,
+    "date": "2024-05-07",
+    "is_fake": false
+  },
+  {
+    "review_id": "g11",
+    "author": "priya_n",
+    "rating": 2,
+    "text": "The filter needs replacing every six weeks, not six months as the listing claims. Doing the maths that is an extra ninety pounds a year.",
+    "verified_purchase": true,
+    "account_age_days": 1220,
+    "date": "2024-05-08",
+    "is_fake": false
+  },
+  {
+    "review_id": "g12",
+    "author": "erikw",
+    "rating": 5,
+    "text": "I have owned three of these over the years. This revision finally fixed the wobble in the base plate. Highly recommend it to anyone on the fence.",
+    "verified_purchase": true,
+    "account_age_days": 3100,
+    "date": "2024-05-08",
+    "is_fake": false
+  },
+  {
+    "review_id": "g13",
+    "author": "chloe_b",
+    "rating": 1,
+    "text": "Stopped charging on day nine. The seller offered a partial refund only if I removed this review, which I declined.",
+    "verified_purchase": true,
+    "account_age_days": 480,
+    "date": "2024-05-09",
+    "is_fake": false
+  },
+  {
+    "review_id": "g14",
+    "author": "omar_s",
+    "rating": 4,
+    "text": "منتج جيد جدا ولكن الشحن تأخر أسبوعين. الجودة تستحق الانتظار في رأيي.",
+    "verified_purchase": true,
+    "account_age_days": 700,
+    "date": "2024-05-09",
+    "is_fake": false
+  },
+  {
+    "review_id": "g15",
+    "author": "j_whitfield",
+    "rating": 3,
+    "text": "Fine. Does the job.",
+    "verified_purchase": true,
+    "account_age_days": 1900,
+    "date": "2024-05-10",
+    "is_fake": false
+  },
+  {
+    "review_id": "g16",
+    "author": "mei_l",
+    "rating": 5,
+    "text": "Replaced a unit that lasted eleven years, so my expectations were high. This one is quieter but the controls are less tactile.",
+    "verified_purchase": true,
+    "account_age_days": 2750,
+    "date": "2024-05-10",
+    "is_fake": false
+  },
+  {
+    "review_id": "g17",
+    "author": "danny_k",
+    "rating": 4,
+    "text": "Solid bit of kit. Took a star off because the included cable is far too short for a desktop.",
+    "verified_purchase": true,
+    "account_age_days": 150,
+    "date": "2024-05-11",
+    "is_fake": false
+  },
+  {
+    "review_id": "g18",
+    "author": "rosa_gm",
+    "rating": 5,
+    "text": "Perfect!",
+    "verified_purchase": true,
+    "account_age_days": 45,
+    "date": "2024-05-11",
+    "is_fake": false
+  },
+  {
+    "review_id": "g19",
+    "author": "ivan_dr",
+    "rating": 2,
+    "text": "Instructions reference a part that is not in the box. Contacted the seller twice with no reply after eight days.",
+    "verified_purchase": false,
+    "account_age_days": 890,
+    "date": "2024-05-12",
+    "is_fake": false
+  },
+  {
+    "review_id": "g20",
+    "author": "fatima_z",
+    "rating": 4,
+    "text": "Been using it daily for a month. Handles the school run and the weekly shop without issue. Wheels squeak in wet weather.",
+    "verified_purchase": true,
+    "account_age_days": 1050,
+    "date": "2024-05-12",
+    "is_fake": false
+  },
+  {
+    "review_id": "h01",
+    "author": "first_time_buyer_j",
+    "rating": 5,
+    "text": "Love it, thank you!",
+    "verified_purchase": false,
+    "account_age_days": 1,
+    "date": "2024-05-12",
+    "is_fake": false
+  },
+  {
+    "review_id": "h02",
+    "author": "grandad_ron",
+    "rating": 5,
+    "text": "Highly recommend.",
+    "verified_purchase": false,
+    "account_age_days": 2,
+    "date": "2024-05-12",
+    "is_fake": false
+  },
+  {
+    "review_id": "h03",
+    "author": "kirsty_mc",
+    "rating": 5,
+    "text": "Works as described, arrived on time.",
+    "verified_purchase": true,
+    "account_age_days": 640,
+    "date": "2024-05-12",
+    "is_fake": false
+  },
+  {
+    "review_id": "h04",
+    "author": "peter_vance",
+    "rating": 5,
+    "text": "Works as described, arrived on time.",
+    "verified_purchase": true,
+    "account_age_days": 1180,
+    "date": "2024-05-12",
+    "is_fake": false
+  },
+  {
+    "review_id": "h05",
+    "author": "nina_bulk",
+    "rating": 4,
+    "text": "Ordered the desk, the lamp and the chair together. The desk is the pick of the three, assembly took under an hour.",
+    "verified_purchase": true,
+    "account_age_days": 2200,
+    "date": "2024-05-12",
+    "is_fake": false
+  },
+  {
+    "review_id": "h06",
+    "author": "nina_bulk",
+    "rating": 3,
+    "text": "The lamp flickers on the lowest brightness setting. Returned it and kept the rest of the order.",
+    "verified_purchase": true,
+    "account_age_days": 2200,
+    "date": "2024-05-12",
+    "is_fake": false
+  },
+  {
+    "review_id": "h07",
+    "author": "nina_bulk",
+    "rating": 5,
+    "text": "The chair is far better than the price suggests. Lumbar support is firm and the castors do not mark the floor.",
+    "verified_purchase": true,
+    "account_age_days": 2200,
+    "date": "2024-05-12",
+    "is_fake": false
+  },
+  {
+    "review_id": "f01",
+    "author": "user881245",
+    "rating": 5,
+    "text": "Best product ever! Highly recommend! Five stars!",
+    "verified_purchase": false,
+    "account_age_days": 1,
+    "date": "2024-05-13",
+    "is_fake": true
+  },
+  {
+    "review_id": "f02",
+    "author": "user992117",
+    "rating": 5,
+    "text": "Best product ever! Highly recommend! Five stars!",
+    "verified_purchase": false,
+    "account_age_days": 2,
+    "date": "2024-05-13",
+    "is_fake": true
+  },
+  {
+    "review_id": "f03",
+    "author": "user773901",
+    "rating": 5,
+    "text": "Bеst prоduct еver! Highly rеcommend!",
+    "verified_purchase": false,
+    "account_age_days": 1,
+    "date": "2024-05-13",
+    "is_fake": true
+  },
+  {
+    "review_id": "f04",
+    "author": "user551020",
+    "rating": 5,
+    "text": "Ｂｅｓｔ ｐｒｏｄｕｃｔ ｅｖｅｒ ｆｉｖｅ ｓｔａｒｓ",
+    "verified_purchase": false,
+    "account_age_days": 0,
+    "date": "2024-05-13",
+    "is_fake": true
+  },
+  {
+    "review_id": "f05",
+    "author": "growth_hacker_9",
+    "rating": 5,
+    "text": "This changed my life! Worth every penny! Will buy again!",
+    "verified_purchase": false,
+    "account_age_days": 1,
+    "date": "2024-05-14",
+    "is_fake": true
+  },
+  {
+    "review_id": "f06",
+    "author": "growth_hacker_9",
+    "rating": 5,
+    "text": "Amazing product amazing service, exceeded my expectations!",
+    "verified_purchase": false,
+    "account_age_days": 1,
+    "date": "2024-05-14",
+    "is_fake": true
+  },
+  {
+    "review_id": "f07",
+    "author": "growth_hacker_9",
+    "rating": 5,
+    "text": "Great product great service, will buy again!",
+    "verified_purchase": false,
+    "account_age_days": 1,
+    "date": "2024-05-14",
+    "is_fake": true
+  },
+  {
+    "review_id": "f08",
+    "author": "reviewpro_x",
+    "rating": 1,
+    "text": "Don't waste your money!!!",
+    "verified_purchase": false,
+    "account_age_days": 0,
+    "date": "2024-05-15",
+    "is_fake": true
+  },
+  {
+    "review_id": "f09",
+    "author": "reviewpro_x",
+    "rating": 1,
+    "text": "DON'T WASTE YOUR MONEY!!! TERRIBLE!!!",
+    "verified_purchase": false,
+    "account_age_days": 0,
+    "date": "2024-05-15",
+    "is_fake": true
+  },
+  {
+    "review_id": "f10",
+    "author": "reviewpro_x",
+    "rating": 1,
+    "text": "Don't waste your money, worst purchase ever!!!",
+    "verified_purchase": false,
+    "account_age_days": 0,
+    "date": "2024-05-15",
+    "is_fake": true
+  },
+  {
+    "review_id": "f11",
+    "author": "acct_40021",
+    "rating": 5,
+    "text": "B-e-s-t p-r-o-d-u-c-t e-v-e-r",
+    "verified_purchase": false,
+    "account_age_days": 2,
+    "date": "2024-05-16",
+    "is_fake": true
+  },
+  {
+    "review_id": "f12",
+    "author": "acct_40022",
+    "rating": 5,
+    "text": "Best prodddduct everrr, highly recommendddd",
+    "verified_purchase": false,
+    "account_age_days": 3,
+    "date": "2024-05-16",
+    "is_fake": true
+  },
+  {
+    "review_id": "f13",
+    "author": "seo_boost_44",
+    "rating": 5,
+    "text": "Exceeded my expectations, worth every penny, five stars all the way!",
+    "verified_purchase": false,
+    "account_age_days": 2,
+    "date": "2024-05-17",
+    "is_fake": true
+  },
+  {
+    "review_id": "f14",
+    "author": "seo_boost_45",
+    "rating": 5,
+    "text": "Exceeded my expectations, worth every penny, five stars all the way!",
+    "verified_purchase": false,
+    "account_age_days": 2,
+    "date": "2024-05-17",
+    "is_fake": true
+  },
+  {
+    "review_id": "f15",
+    "author": "quickcash_ml",
+    "rating": 5,
+    "text": "AMAZING PRODUCT AMAZING SERVICE!!! CHANGED MY LIFE!!!",
+    "verified_purchase": false,
+    "account_age_days": 0,
+    "date": "2024-05-18",
+    "is_fake": true
+  }
+]

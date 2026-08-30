@@ -1,7 +1,13 @@
-"""Heuristic scoring engine for detecting likely fake/policy-violating reviews.
+"""Compatibility surface for the original scoring API.
 
-The signals implemented here mirror the kinds of patterns real Trust &
-Safety / abuse-fighting teams look for (see ../RESEARCH.md):
+The heuristics that used to live here now sit in
+:mod:`fake_review_detector.signals` (detection),
+:mod:`fake_review_detector.dedupe` (near-duplicates) and
+:mod:`fake_review_detector.engine` (scoring and enforcement), where they are
+policy-driven, evasion-resistant and auditable.
+
+The signals themselves are unchanged, and mirror what abuse-fighting teams look
+for (see ``../RESEARCH.md``):
 
 * generic, templated praise/complaint phrases often used by paid reviewers
 * extreme ratings (1 or 5 stars) paired with very short, low-effort text
@@ -9,138 +15,91 @@ Safety / abuse-fighting teams look for (see ../RESEARCH.md):
 * reviews from unverified purchases
 * reviews from very new accounts
 * "review bursts" -- many reviews posted by the same author on the same day
-* near-duplicate text shared across multiple reviews (a sign of a
-  review farm or copy/paste campaign)
+* near-duplicate text shared across multiple reviews
 
-This is a simplified, educational demonstration, not a production
-moderation system.
+:func:`score_review` and :func:`score_reviews` are kept for existing callers.
+They score, but they do not validate input or produce an enforcement decision.
+New code should use :func:`fake_review_detector.engine.moderate_batch`, which
+validates untrusted input, applies a versioned policy, and returns decisions
+that can be written to an audit log and routed to human review.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from difflib import SequenceMatcher
 from typing import Iterable
 
-# Generic phrases frequently seen in low-effort / templated fake reviews.
-_GENERIC_PHRASES = [
-    "best product ever",
-    "highly recommend",
-    "changed my life",
-    "five stars",
-    "great product great service",
-    "will buy again",
-    "amazing product amazing service",
-    "worth every penny",
-    "exceeded my expectations",
-    "don't waste your money",
+from .engine import score_batch
+from .models import (
+    RISK_HIGH,
+    RISK_LOW,
+    RISK_MEDIUM,
+    Review,
+    ReviewScore,
+    RiskLevel,
+)
+from .policy import Policy
+from .signals import GENERIC_PHRASES as _GENERIC_PHRASE_TUPLE
+from .signals import evaluate_review, is_generic, is_shouty
+
+__all__ = [
+    "Review",
+    "ReviewScore",
+    "RISK_HIGH",
+    "RISK_MEDIUM",
+    "RISK_LOW",
+    "score_review",
+    "score_reviews",
+    "NEW_ACCOUNT_DAYS",
+    "SHORT_REVIEW_WORD_COUNT",
+    "DUPLICATE_SIMILARITY_THRESHOLD",
+    "BURST_REVIEW_COUNT",
 ]
 
-# A review posted within this many days of account creation is
-# considered "new account" for scoring purposes.
-NEW_ACCOUNT_DAYS = 3
+_DEFAULT_POLICY = Policy()
 
-# Reviews with fewer than this many words paired with an extreme rating
-# are considered "low effort".
-SHORT_REVIEW_WORD_COUNT = 6
-
-# Near-duplicate text similarity ratio (0-1) above which two reviews are
-# flagged as likely copy/paste review-farm content.
-DUPLICATE_SIMILARITY_THRESHOLD = 0.85
-
-# Number of same-day reviews from one author that counts as a "burst".
-BURST_REVIEW_COUNT = 3
-
-RISK_HIGH = "high"
-RISK_MEDIUM = "medium"
-RISK_LOW = "low"
-
-
-@dataclass
-class Review:
-    """A single review to be scored."""
-
-    review_id: str
-    author: str
-    rating: int
-    text: str
-    verified_purchase: bool = True
-    account_age_days: int | None = None
-    date: str | None = None  # ISO date string, e.g. "2024-05-01"
-
-
-@dataclass
-class ReviewScore:
-    """The result of scoring a single :class:`Review`."""
-
-    review_id: str
-    score: int
-    risk_level: str
-    reasons: list[str] = field(default_factory=list)
+# Retained for callers that imported these directly. The authoritative values
+# now live on Policy, which is what the engine actually reads.
+_GENERIC_PHRASES = list(_GENERIC_PHRASE_TUPLE)
+NEW_ACCOUNT_DAYS = _DEFAULT_POLICY.new_account_days
+SHORT_REVIEW_WORD_COUNT = _DEFAULT_POLICY.short_review_word_count
+DUPLICATE_SIMILARITY_THRESHOLD = _DEFAULT_POLICY.duplicate_similarity_threshold
+BURST_REVIEW_COUNT = _DEFAULT_POLICY.burst_review_count
 
 
 def _is_generic(text: str) -> bool:
-    lowered = text.lower()
-    return any(phrase in lowered for phrase in _GENERIC_PHRASES)
+    return is_generic(text)
 
 
 def _is_shouty(text: str) -> bool:
-    if not text:
-        return False
-    exclamations = text.count("!")
-    letters = [c for c in text if c.isalpha()]
-    caps_ratio = (
-        sum(1 for c in letters if c.isupper()) / len(letters) if letters else 0
-    )
-    return exclamations >= 3 or caps_ratio > 0.6
+    hit, _ = is_shouty(text)
+    return hit
 
 
-def _risk_level(score: int) -> str:
-    if score >= 60:
-        return RISK_HIGH
-    if score >= 30:
-        return RISK_MEDIUM
-    return RISK_LOW
+def _risk_level(score: int) -> RiskLevel:
+    return _DEFAULT_POLICY.risk_level(score)
 
 
-def score_review(review: Review, reasons_only: bool = False) -> tuple[int, list[str]]:
+def score_review(
+    review: Review, reasons_only: bool = False, policy: Policy | None = None
+) -> tuple[int, list[str]]:
     """Score a single review in isolation (no batch-level signals).
 
     Returns a ``(score, reasons)`` tuple. ``score`` is clamped to 0-100.
+
+    Input is not validated; pass untrusted data through
+    :func:`fake_review_detector.engine.moderate` instead.
     """
 
-    score = 0
-    reasons: list[str] = []
-
-    word_count = len(review.text.split())
-
-    if _is_generic(review.text):
-        score += 25
-        reasons.append("generic/templated phrase detected")
-
-    if review.rating in (1, 5) and word_count <= SHORT_REVIEW_WORD_COUNT:
-        score += 20
-        reasons.append("extreme rating with very short, low-effort text")
-
-    if _is_shouty(review.text):
-        score += 15
-        reasons.append("excessive exclamation marks or ALL CAPS text")
-
-    if not review.verified_purchase:
-        score += 20
-        reasons.append("unverified purchase")
-
-    if review.account_age_days is not None and review.account_age_days <= NEW_ACCOUNT_DAYS:
-        score += 20
-        reasons.append(
-            f"account created only {review.account_age_days} day(s) before review"
-        )
-
-    score = max(0, min(100, score))
-    return score, reasons
+    policy = policy or _DEFAULT_POLICY
+    hits = evaluate_review(review, policy)
+    hits.sort(key=lambda h: (-h.weight, h.code))
+    score = max(0, min(100, sum(h.weight for h in hits)))
+    return score, [h.message for h in hits]
 
 
-def score_reviews(reviews: Iterable[Review]) -> list[ReviewScore]:
+def score_reviews(
+    reviews: Iterable[Review], policy: Policy | None = None
+) -> list[ReviewScore]:
     """Score a batch of reviews, including batch-level signals.
 
     Batch-level signals detected here (in addition to the per-review
@@ -148,57 +107,10 @@ def score_reviews(reviews: Iterable[Review]) -> list[ReviewScore]:
 
     * duplicate/near-duplicate review text across the batch
     * multiple reviews from the same author on the same day ("bursts")
+
+    Results are ordered highest score first.
     """
 
-    reviews = list(reviews)
-    base_results: dict[str, tuple[int, list[str]]] = {
-        r.review_id: score_review(r) for r in reviews
-    }
-
-    # Detect near-duplicate text across the batch (O(n^2), fine for
-    # the small demo/showcase batches this tool targets).
-    duplicate_ids: set[str] = set()
-    for i, a in enumerate(reviews):
-        for b in reviews[i + 1 :]:
-            if not a.text or not b.text:
-                continue
-            ratio = SequenceMatcher(None, a.text.lower(), b.text.lower()).ratio()
-            if ratio >= DUPLICATE_SIMILARITY_THRESHOLD:
-                duplicate_ids.add(a.review_id)
-                duplicate_ids.add(b.review_id)
-
-    # Detect same-author/same-day review bursts.
-    author_day_counts: dict[tuple[str, str], int] = {}
-    for r in reviews:
-        if r.date:
-            key = (r.author, r.date)
-            author_day_counts[key] = author_day_counts.get(key, 0) + 1
-
-    results: list[ReviewScore] = []
-    for r in reviews:
-        score, reasons = base_results[r.review_id]
-        reasons = list(reasons)
-
-        if r.review_id in duplicate_ids:
-            score += 25
-            reasons.append("near-duplicate text shared with another review")
-
-        if r.date and author_day_counts.get((r.author, r.date), 0) >= BURST_REVIEW_COUNT:
-            score += 20
-            reasons.append(
-                "review burst: author posted "
-                f"{author_day_counts[(r.author, r.date)]} reviews on {r.date}"
-            )
-
-        score = max(0, min(100, score))
-        results.append(
-            ReviewScore(
-                review_id=r.review_id,
-                score=score,
-                risk_level=_risk_level(score),
-                reasons=reasons,
-            )
-        )
-
-    results.sort(key=lambda rs: rs.score, reverse=True)
-    return results
+    scores, _ = score_batch(list(reviews), policy or _DEFAULT_POLICY)
+    scores.sort(key=lambda s: (-s.score, s.review_id))
+    return scores
