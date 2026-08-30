@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from .audit import AuditLog, replay
+from .calibration import OBJECTIVES, calibrate, precision_at_prevalence
 from .engine import moderate_batch
 from .errors import ModerationError, PolicyError, ValidationError
 from .evaluation import evaluate, load_labelled, threshold_sweep
@@ -137,6 +138,51 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_calibrate(args: argparse.Namespace) -> int:
+    policy = _load_policy(args.policy)
+    labelled, errors = load_labelled(_load_json(args.labelled_file))
+    if errors:
+        print(f"{len(errors)} item(s) skipped:", file=sys.stderr)
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
+    if not labelled:
+        raise ModerationError("no usable labelled reviews")
+
+    result = calibrate(
+        labelled,
+        policy,
+        objective=args.objective,
+        recall_floor=args.recall_floor,
+        test_fraction=args.test_fraction,
+        salt=args.salt,
+        step=args.step,
+    )
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0 if result.recommended else 1
+
+    print(result.format_report())
+    print()
+    print("Precision if the live stream is mostly genuine (worst case within")
+    print("the confidence interval, so a zero-error test split cannot read as")
+    print("a guarantee of zero errors in production):")
+    print(f"  {'prevalence':>10}  {'incumbent':>10}  {'candidate':>10}")
+    for prevalence in (0.37, 0.20, 0.10, 0.05):
+        incumbent = precision_at_prevalence(
+            result.incumbent_recall.low,
+            result.incumbent_false_positive_rate.high,
+            prevalence,
+        )
+        candidate = precision_at_prevalence(
+            result.recall.low,
+            result.false_positive_rate.high,
+            prevalence,
+        )
+        print(f"  {prevalence:>9.0%}  {incumbent:>10.3f}  {candidate:>10.3f}")
+    return 0 if result.recommended else 1
+
+
 def _cmd_queue(args: argparse.Namespace) -> int:
     review_queue = ReviewQueue(args.queue)
 
@@ -245,6 +291,36 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--json", action="store_true")
     evaluate_parser.set_defaults(func=_cmd_evaluate)
 
+    calibrate_parser = subparsers.add_parser(
+        "calibrate",
+        help="Propose a threshold from labelled data, with a held-out test split.",
+    )
+    calibrate_parser.add_argument(
+        "labelled_file", type=Path, help="Reviews with an is_fake label."
+    )
+    calibrate_parser.add_argument("--policy", type=Path)
+    calibrate_parser.add_argument(
+        "--objective",
+        choices=sorted(OBJECTIVES),
+        default="precision_at_recall",
+        help="What to maximise on the training split.",
+    )
+    calibrate_parser.add_argument(
+        "--recall-floor",
+        type=float,
+        default=0.90,
+        help="Minimum acceptable recall for the precision_at_recall objective.",
+    )
+    calibrate_parser.add_argument(
+        "--test-fraction", type=float, default=0.5, help="Share of authors held out."
+    )
+    calibrate_parser.add_argument(
+        "--salt", default="calibration-v1", help="Changes which authors land in which split."
+    )
+    calibrate_parser.add_argument("--step", type=int, default=5, help="Sweep step size.")
+    calibrate_parser.add_argument("--json", action="store_true")
+    calibrate_parser.set_defaults(func=_cmd_calibrate)
+
     queue_parser = subparsers.add_parser("queue", help="Inspect and work the review queue.")
     queue_parser.add_argument("--queue", type=Path, default=Path("queue.json"))
     queue_parser.add_argument("--list", action="store_true", help="List pending items.")
@@ -294,18 +370,22 @@ def build_parser() -> argparse.ArgumentParser:
     replay_parser.add_argument("--json", action="store_true")
     replay_parser.set_defaults(func=_cmd_replay)
 
+    #: Read back off the subparsers so the bare-path compatibility shim in
+    #: main() cannot drift out of sync when a subcommand is added.
+    parser.subcommand_names = frozenset(subparsers.choices)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # Original usage was a bare path with no subcommand; keep it working.
-    if argv and not argv[0].startswith("-") and argv[0] not in {
-        "score", "evaluate", "queue", "verify", "replay",
-    }:
+    parser = build_parser()
+    # Original usage was a bare path with no subcommand; keep it working. The
+    # command names are read back off the parser rather than repeated here, so
+    # adding a subcommand cannot silently turn it into a filename.
+    commands = getattr(parser, "subcommand_names", frozenset())
+    if argv and not argv[0].startswith("-") and argv[0] not in commands:
         argv.insert(0, "score")
 
-    parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
         parser.print_help()

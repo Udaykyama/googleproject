@@ -39,7 +39,9 @@ __all__ = [
     "wilson_interval",
     "split_by_author",
     "calibrate",
+    "precision_at_prevalence",
     "OBJECTIVES",
+    "TYPICAL_PREVALENCE",
 ]
 
 
@@ -94,6 +96,28 @@ def wilson_interval(successes: int, total: int, z: float = 1.96) -> Interval:
     )
 
 
+def precision_at_prevalence(
+    recall: float, false_positive_rate: float, prevalence: float
+) -> float:
+    """Precision this detector would show on a stream that is ``prevalence`` fake.
+
+    Recall and false-positive rate are properties of the detector; precision is
+    a property of the detector *and the population it runs on*. Reporting the
+    precision measured on a balanced evaluation set as though it were the
+    production number is the single easiest way to overstate a moderation
+    system, so this makes the translation explicit.
+    """
+
+    if not 0.0 <= prevalence <= 1.0:
+        raise ValueError(f"prevalence must be in [0, 1], got {prevalence}")
+    true_positives = prevalence * recall
+    false_positives = (1.0 - prevalence) * false_positive_rate
+    flagged = true_positives + false_positives
+    if flagged <= 0.0:
+        return 0.0
+    return true_positives / flagged
+
+
 def _precision_interval(metrics: Metrics) -> Interval:
     flagged = metrics.true_positives + metrics.false_positives
     return wilson_interval(metrics.true_positives, flagged)
@@ -102,6 +126,11 @@ def _precision_interval(metrics: Metrics) -> Interval:
 def _recall_interval(metrics: Metrics) -> Interval:
     actual = metrics.true_positives + metrics.false_negatives
     return wilson_interval(metrics.true_positives, actual)
+
+
+def _false_positive_rate_interval(metrics: Metrics) -> Interval:
+    genuine = metrics.false_positives + metrics.true_negatives
+    return wilson_interval(metrics.false_positives, genuine)
 
 
 @dataclass(frozen=True)
@@ -234,8 +263,10 @@ class CalibrationResult:
     incumbent_test: Metrics
     precision: Interval
     recall: Interval
+    false_positive_rate: Interval
     incumbent_precision: Interval
     incumbent_recall: Interval
+    incumbent_false_positive_rate: Interval
     split_counts: dict
     #: True when the test-set precision intervals of the candidate and the
     #: incumbent overlap — i.e. the data cannot tell them apart.
@@ -244,9 +275,19 @@ class CalibrationResult:
 
     @property
     def recommended(self) -> bool:
-        """Whether the evidence supports changing the incumbent threshold."""
+        """Whether the evidence supports changing the incumbent threshold.
 
-        return not self.inconclusive and self.threshold != self.incumbent
+        Separated confidence intervals are necessary but not sufficient. A
+        small test split can separate two intervals by luck, so any sample-size
+        warning also blocks the recommendation: the honest answer on thin data
+        is "get more data", not "ship the winner".
+        """
+
+        return (
+            not self.inconclusive
+            and not self.warnings
+            and self.threshold != self.incumbent
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -261,10 +302,79 @@ class CalibrationResult:
             "incumbent_test": self.incumbent_test.to_dict(),
             "test_precision": self.precision.to_dict(),
             "test_recall": self.recall.to_dict(),
+            "test_false_positive_rate": self.false_positive_rate.to_dict(),
             "incumbent_test_precision": self.incumbent_precision.to_dict(),
             "incumbent_test_recall": self.incumbent_recall.to_dict(),
+            "incumbent_test_false_positive_rate": (
+                self.incumbent_false_positive_rate.to_dict()
+            ),
+            "precision_at_prevalence": {
+                f"{prevalence:.2f}": round(
+                    precision_at_prevalence(
+                        self.recall.low, self.false_positive_rate.high, prevalence
+                    ),
+                    4,
+                )
+                for prevalence in (0.37, 0.20, 0.10, 0.05)
+            },
             "warnings": list(self.warnings),
         }
+
+    def format_report(self) -> str:
+        """A report that leads with the verdict, not the winning number."""
+
+        counts = self.split_counts
+        lines = [
+            f"objective        {self.objective}",
+            f"split            {counts['train']['total']} train "
+            f"({counts['train']['fake']} fake) / {counts['test']['total']} test "
+            f"({counts['test']['fake']} fake), grouped by author",
+            f"candidate        threshold {self.threshold}",
+            f"incumbent        threshold {self.incumbent}",
+            "",
+            "Held-out test set (the only numbers that mean anything):",
+            f"  {'':<12} {'precision':>22}  {'recall':>22}",
+            f"  {'candidate':<12} {str(self.precision):>22}"
+            f"  {str(self.recall):>22}",
+            f"  {'incumbent':<12} {str(self.incumbent_precision):>22}"
+            f"  {str(self.incumbent_recall):>22}",
+            "",
+        ]
+        if self.threshold == self.incumbent:
+            lines.append("VERDICT: keep the current threshold; the sweep chose it too.")
+        elif self.warnings and not self.inconclusive:
+            lines.append(
+                f"VERDICT: threshold {self.threshold} looks better than "
+                f"{self.incumbent}, but the test split is too small to act on. "
+                f"Treat this as a reason to collect more labelled data, not as "
+                f"a licence to change the default."
+            )
+        elif self.inconclusive:
+            lines.append(
+                "VERDICT: not enough evidence to change the threshold. The "
+                "candidate and incumbent confidence intervals overlap, so this "
+                "data cannot tell them apart."
+            )
+        else:
+            lines.append(
+                f"VERDICT: the evidence supports moving the threshold to "
+                f"{self.threshold}."
+            )
+        if self.warnings:
+            lines.append("")
+            lines.append("Warnings:")
+            lines.extend(f"  - {warning}" for warning in self.warnings)
+        return "\n".join(lines)
+
+
+#: Plausible range for the true share of fake reviews on a live platform.
+#: Published research corpora are built at or near 50/50 because a balanced set
+#: is easier to learn from, but real prevalence is far lower. This matters more
+#: than it looks: recall and false-positive rate do not depend on prevalence,
+#: but *precision* does, and it collapses as prevalence falls. A detector
+#: measured at 0.78 precision on a 37%-fake set is at 0.24 on a 5%-fake stream
+#: -- three of every four flags wrong -- without a single line of code changing.
+TYPICAL_PREVALENCE = (0.05, 0.20)
 
 
 #: Below this many test reviews, any difference between thresholds is noise.
@@ -306,6 +416,16 @@ def calibrate(
     items = list(labelled)
     if not items:
         raise ValueError("no labelled reviews to calibrate on")
+
+    fakes = sum(1 for item in items if item.is_fake)
+    if fakes == 0 or fakes == len(items):
+        # With one class present, recall or false-positive rate is undefined and
+        # every threshold scores identically, so the sweep would return an
+        # arbitrary winner that looks like a real result.
+        present = "fake" if fakes else "genuine"
+        raise ValueError(
+            f"calibration needs both classes; all {len(items)} review(s) are {present}"
+        )
 
     split = split_by_author(items, test_fraction=test_fraction, salt=salt)
     if not split.train or not split.test:
@@ -362,6 +482,8 @@ def calibrate(
         recall=_recall_interval(test),
         incumbent_precision=incumbent_precision,
         incumbent_recall=_recall_interval(incumbent_test),
+        false_positive_rate=_false_positive_rate_interval(test),
+        incumbent_false_positive_rate=_false_positive_rate_interval(incumbent_test),
         split_counts=split.counts(),
         inconclusive=precision.overlaps(incumbent_precision),
         warnings=tuple(warnings),

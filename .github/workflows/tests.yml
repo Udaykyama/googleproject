@@ -73,6 +73,29 @@ jobs:
               --audit-log /tmp/decisions.jsonl
           python -m fake_review_detector.cli queue --list --queue /tmp/queue.json
 
+      - name: Calibration must refuse to recommend on thin data
+        # `calibrate` exits non-zero when the evidence cannot justify moving the
+        # threshold. On the 174-review set it never can, so a zero exit here
+        # means the guard rails have been removed.
+        run: |
+          if python -m fake_review_detector.cli calibrate \
+              data/labelled_reviews.json > /tmp/calibration.txt; then
+            echo "calibrate recommended a change on 174 reviews; guard rails gone"
+            cat /tmp/calibration.txt
+            exit 1
+          fi
+          cat /tmp/calibration.txt
+          grep -q "VERDICT" /tmp/calibration.txt
+          python -m fake_review_detector.cli calibrate \
+              data/labelled_reviews.json --json > /tmp/calibration.json || true
+          python - <<'PY'
+          import json
+          payload = json.load(open("/tmp/calibration.json"))
+          assert payload["recommended"] is False, payload
+          assert payload["precision_at_prevalence"]["0.05"] < 1.0, payload
+          print("calibration guard rails intact")
+          PY
+
       - name: Tampering must fail the build
         # A verifier that cannot fail is not a verifier. This asserts the
         # non-zero exit, so a regression that always returns 0 is caught.
