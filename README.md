@@ -281,34 +281,129 @@ text, unverified purchases, brand-new accounts, near-duplicate review text
 across a batch (review farms), and same-day review "bursts" from one
 author.
 
+### Architecture
+
+The scoring heuristics are the easy part; the moderation system around them is
+what makes decisions defensible. The package is layered so each concern is
+testable on its own:
+
+| Module | Responsibility |
+| --- | --- |
+| `normalize.py` | Fold evasion: homoglyphs, invisible characters, letter-spacing, character runs |
+| `validation.py` | Reject malformed input before it reaches scoring |
+| `policy.py` | Versioned, hashable thresholds and weights; the auto-removal guard |
+| `signals.py` | Per-review signals, each with a stable code |
+| `dedupe.py` | Near-duplicate detection via MinHash + LSH blocking |
+| `engine.py` | Combine signals into a score, a risk level and an action |
+| `queue.py` | Persistent human-review queue with claim/resolve and overturn stats |
+| `audit.py` | Hash-chained decision log that can be verified and replayed |
+| `evaluation.py` | Precision/recall measurement and threshold sweeps |
+
+Every decision records the policy version and digest, plus a digest of the
+review content, so a decision can be re-derived later and compared against
+what was actually served.
+
 ### Usage
 
 ```bash
 # Run the test suite
-python3 -m pytest tests/ -v
+python3 -m pytest tests/ -q
 
-# Score the sample batch of reviews and print a risk report
-python3 -m fake_review_detector.cli data/sample_reviews.json
+# Score a batch and print a moderation report
+python3 -m fake_review_detector.cli score data/sample_reviews.json
+
+# Measure precision/recall against labelled data
+python3 -m fake_review_detector.cli evaluate data/labelled_reviews.json
+
+# Work the human-review queue, and check the audit log is intact
+python3 -m fake_review_detector.cli score data/sample_reviews.json \
+    --audit-log decisions.jsonl --queue queue.json
+python3 -m fake_review_detector.cli queue --list --queue queue.json
+python3 -m fake_review_detector.cli verify --audit-log decisions.jsonl
+python3 -m fake_review_detector.cli replay data/sample_reviews.json \
+    --audit-log decisions.jsonl
 ```
 
 Or use it as a library:
 
 ```python
-from fake_review_detector import Review, score_reviews
+from fake_review_detector import Review, moderate_batch
 
 reviews = [
     Review(review_id="1", author="alice", rating=5,
            text="Great, well-made product that has held up over months of use.",
            verified_purchase=True, account_age_days=500, date="2024-01-01"),
 ]
-for result in score_reviews(reviews):
-    print(result.review_id, result.score, result.risk_level, result.reasons)
+for decision in moderate_batch(reviews).decisions:
+    print(decision.review_id, decision.score, decision.risk_level, decision.action)
 ```
+
+The original `score_review` / `score_reviews` API still works unchanged.
+
+### Measured behaviour
+
+Numbers below are from this repository on a 2-core CI runner, not estimates.
+
+**Duplicate detection.** The original exhaustive comparison was quadratic,
+growing 4x per doubling:
+
+| Reviews | Exhaustive | Blocked (LSH) |
+| --- | --- | --- |
+| 100 | 1.6 s | — |
+| 800 | 104 s | — |
+| 2 000 | ~11 min (extrapolated) | 0.6 s |
+| 5 000 | ~70 min (extrapolated) | 1.6 s |
+
+A *review bomb* — thousands of near-identical texts — is a different case,
+because it genuinely contains a quadratic number of true duplicate pairs. No
+candidate-generation scheme changes that, so the number of partners recorded
+per review is capped instead: 2 000 near-identical reviews take **2.8 s** and
+still flag 1 999 of them, with `DuplicateReport.truncated` set to say the pair
+list is deliberately incomplete.
+
+**Evasion.** Nine mutations that defeated the original phrase matching —
+Cyrillic homoglyphs, fullwidth forms, zero-width spaces, stretched characters,
+doubled spaces, and letter-spacing such as `B-e-s-t p-r-o-d-u-c-t e-v-e-r` —
+now all normalize to the same matching key and are caught. Homoglyph folding is
+applied only to words that *mix* scripts, so genuine non-Latin reviews are not
+mangled.
+
+**Accuracy**, against the 42 labelled reviews in `data/labelled_reviews.json`:
+
+```
+precision 0.789   recall 1.000   f1 0.882   FPR 0.148
+TP 15  FP 4  TN 23  FN 0
+```
+
+That precision figure is the honest one. The labelled set includes hard
+negatives — genuine short reviews from new, unverified accounts — and one of
+them (`h02`, a real "Highly recommend.") scores **85**, higher than several
+actual fakes. Heuristics cannot separate those cases, which is exactly why the
+system enqueues for human review rather than deleting.
+
+### Limitations
+
+- **Heuristics, not ground truth.** Nothing here proves a review is fake. At
+  the default threshold roughly one in seven genuine reviews in the labelled
+  set is flagged, so output is a work queue, not a verdict.
+- **Auto-removal is off by default.** `Policy.allow_auto_removal` is `False`,
+  and `action_for()` downgrades a removal to an enqueue unless it is explicitly
+  enabled. The `h02` case above is why.
+- **No identity or graph signals.** Real review-farm detection leans on device,
+  payment and network-graph evidence that a text-only tool cannot see.
+- **Single-process queue and log.** Both are file-backed and assume one writer;
+  they demonstrate the mechanism, not a distributed deployment.
+- **Duplicate pair lists are capped** in dense clusters, as described above.
+- **English-centric phrase list.** Normalization is script-aware, but the
+  templated-phrase table itself is English.
 
 ### Project layout
 
-- `fake_review_detector/detector.py` — the heuristic scoring engine
-- `fake_review_detector/cli.py` — command-line report generator
+- `fake_review_detector/` — the moderation package (modules listed above)
+- `fake_review_detector/detector.py` — compatibility shim for the original API
+- `fake_review_detector/cli.py` — command-line entry point
 - `data/sample_reviews.json` — example batch of genuine + fake reviews
-- `tests/test_detector.py` — pytest unit tests
+- `data/labelled_reviews.json` — 42 labelled reviews used for evaluation
+- `tests/` — unit tests, including `test_production_hardening.py`, which pins
+  each measured gap above as a regression test
 - `RESEARCH.md` — the research behind the problem this project showcases

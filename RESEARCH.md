@@ -376,6 +376,34 @@ a rule-based **Fake Review Detector** that scores individual reviews and
 whole batches for the same kinds of signals real Trust & Safety teams look
 for (see `README.md` for usage).
 
-This is a simplified, educational demonstration — not a production
-moderation system — but it illustrates the core detection signals in a way
-that is easy to run, test, and extend.
+### From demonstration to moderation system
+
+The detector began as an illustration of those signals. Detection signals
+alone, though, are the part of content moderation that is *least* contested;
+what determines whether a system can be operated is everything around them.
+The package was therefore extended into a moderation system proper:
+
+- **Adversarial input is assumed.** Nine text mutations defeated the original
+  phrase matching, including Cyrillic homoglyphs and letter-spacing. Matching
+  now runs on a normalized key. Homoglyph folding is restricted to words that
+  mix scripts, because folding indiscriminately would corrupt genuine
+  non-Latin reviews — the same reasoning Chrome applies to IDN display.
+- **Decisions are reviewable.** Every decision carries a stable signal code, a
+  policy version and digest, and a content digest, appended to a hash-chained
+  log that can be verified and replayed. A moderation decision that cannot be
+  explained after the fact cannot be appealed.
+- **Removal is not automatic.** Measuring against labelled data — including
+  hard negatives — showed a genuine review ("Highly recommend.", new
+  unverified account) scoring 85, above several real fakes. That is a
+  structural limit of text heuristics, not a tuning error, so high-scoring
+  reviews are enqueued for human review rather than deleted. This mirrors
+  Google's own framing when it retired Postmaster Tools' reputation scores in
+  favour of deterministic compliance signals (§3c): a score that cannot be
+  acted on unambiguously should not be presented as if it can.
+- **Cost is bounded under attack.** Duplicate detection was quadratic, which a
+  review bomb turns into a denial-of-service. Blocking made the normal case
+  sub-quadratic; a per-review partner cap bounds the pathological case, since
+  a bomb of n identical reviews genuinely contains a quadratic number of true
+  duplicate pairs.
+
+`README.md` records the measured numbers, and the limitations that remain.
