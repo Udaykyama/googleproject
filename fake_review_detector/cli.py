@@ -91,7 +91,7 @@ def _cmd_score(args: argparse.Namespace) -> int:
                 print(f"  - {error}", file=sys.stderr)
 
     if args.audit_log:
-        AuditLog(args.audit_log).append(result.decisions)
+        AuditLog(args.audit_log, getattr(args, "anchor", None)).append(result.decisions)
     if args.queue:
         review_queue = ReviewQueue(args.queue)
         added = review_queue.enqueue(result.decisions)
@@ -183,14 +183,26 @@ def _cmd_queue(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    status = AuditLog(args.audit_log).verify()
+    log = AuditLog(args.audit_log, args.anchor)
+
+    if args.re_anchor:
+        anchor = log.write_anchor()
+        print(f"anchored {anchor.records} record(s) at {anchor.head_hash}")
+        return 0
+
+    status = log.verify()
     print(status)
+    if status.valid and not status.anchor_checked and args.require_anchor:
+        print("no anchor present, and --require-anchor was given")
+        return 1
     return 0 if status.valid else 1
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
     policy = _load_policy(args.policy)
-    differences = replay(AuditLog(args.audit_log), _load_json(args.reviews_file), policy)
+    differences = replay(
+        AuditLog(args.audit_log, args.anchor), _load_json(args.reviews_file), policy
+    )
     if args.json:
         print(json.dumps(differences, indent=2))
     elif not differences:
@@ -212,6 +224,11 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("reviews_file", type=Path, help="JSON array of review objects.")
     score.add_argument("--policy", type=Path, help="Policy JSON file.")
     score.add_argument("--audit-log", type=Path, help="Append decisions to this audit log.")
+    score.add_argument(
+        "--anchor",
+        type=Path,
+        help="Anchor file for --audit-log. Defaults to the log path plus '.anchor'.",
+    )
     score.add_argument("--queue", type=Path, help="Add items needing review to this queue.")
     score.add_argument("--json", action="store_true", help="Emit JSON.")
     score.add_argument("--verbose", action="store_true", help="Show signal evidence.")
@@ -244,6 +261,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = subparsers.add_parser("verify", help="Check the audit log has not been altered.")
     verify.add_argument("--audit-log", type=Path, required=True)
+    verify.add_argument(
+        "--anchor",
+        type=Path,
+        help="Anchor file. Defaults to the log path plus '.anchor'. Point this "
+        "at separately administered storage so truncating the log cannot also "
+        "rewrite its anchor.",
+    )
+    verify.add_argument(
+        "--re-anchor",
+        action="store_true",
+        help="Rewrite the anchor to match the log as it currently stands, then "
+        "exit. Only do this when the log's current state is known good.",
+    )
+    verify.add_argument(
+        "--require-anchor",
+        action="store_true",
+        help="Fail when no anchor exists, instead of reporting the truncation "
+        "check as not performed.",
+    )
     verify.set_defaults(func=_cmd_verify)
 
     replay_parser = subparsers.add_parser(
@@ -251,6 +287,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     replay_parser.add_argument("reviews_file", type=Path)
     replay_parser.add_argument("--audit-log", type=Path, required=True)
+    replay_parser.add_argument(
+        "--anchor", type=Path, help="Anchor file. Defaults to the log path plus '.anchor'."
+    )
     replay_parser.add_argument("--policy", type=Path)
     replay_parser.add_argument("--json", action="store_true")
     replay_parser.set_defaults(func=_cmd_replay)

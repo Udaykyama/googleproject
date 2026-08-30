@@ -199,3 +199,187 @@ def test_log_directory_is_created(tmp_path):
     log = AuditLog(tmp_path / "nested" / "deeper" / "audit.jsonl")
     log.append(moderate_batch(batch()).decisions)
     assert log.verify().valid
+
+
+# --- truncation: what a bare hash chain cannot see -----------------------
+
+
+def _truncate(path: Path, drop: int) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    path.write_text("\n".join(lines[: len(lines) - drop]) + "\n", encoding="utf-8")
+
+
+def test_append_writes_an_anchor(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+
+    anchor = log.read_anchor()
+    assert anchor is not None
+    assert anchor.records == 2
+    assert log.verify().anchor_checked is True
+
+
+def test_truncation_is_detected(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    _truncate(log.path, 1)
+
+    status = log.verify()
+    assert status.valid is False
+    assert "truncated" in status.reason
+    assert status.anchor_checked is True
+
+
+def test_truncation_to_empty_is_detected(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    log.path.write_text("", encoding="utf-8")
+
+    status = log.verify()
+    assert status.valid is False
+    assert "truncated" in status.reason
+
+
+def test_truncation_hides_without_an_anchor(tmp_path):
+    """The gap this anchor exists to close: a truncated chain is internally
+    consistent, so verification alone cannot see it."""
+
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    _truncate(log.path, 1)
+    log.anchor_path.unlink()
+
+    status = log.verify()
+    assert status.valid is True
+    # ...but it must not claim the truncation check passed.
+    assert status.anchor_checked is False
+    assert "not checked" in str(status)
+
+
+def test_anchor_can_live_outside_the_log_directory(tmp_path):
+    elsewhere = tmp_path / "separate" / "audit.anchor"
+    log = AuditLog(tmp_path / "audit.jsonl", anchor_path=elsewhere)
+    log.append(moderate_batch(batch()).decisions)
+
+    assert elsewhere.exists()
+    assert not (tmp_path / "audit.jsonl.anchor").exists()
+    assert log.verify().anchor_checked is True
+
+
+def test_stale_anchor_is_reported_not_ignored(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    log.anchor_path.write_text(
+        json.dumps({"records": 1, "head_hash": "0" * 32, "updated_at": ""}),
+        encoding="utf-8",
+    )
+
+    status = log.verify()
+    assert status.valid is False
+    assert "stale" in status.reason
+
+
+def test_head_hash_mismatch_is_detected(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    log.anchor_path.write_text(
+        json.dumps({"records": 2, "head_hash": "f" * 32, "updated_at": ""}),
+        encoding="utf-8",
+    )
+
+    status = log.verify()
+    assert status.valid is False
+    assert "head hash" in status.reason
+
+
+def test_check_anchor_can_be_disabled(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    _truncate(log.path, 1)
+
+    assert log.verify(check_anchor=False).valid is True
+    assert log.verify().valid is False
+
+
+def test_re_anchoring_accepts_the_current_state(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    _truncate(log.path, 1)
+    assert log.verify().valid is False
+
+    log.write_anchor()
+    assert log.verify().valid is True
+
+
+def test_appending_after_truncation_is_refused(tmp_path):
+    """Re-appending must not launder a truncation. If the append were allowed,
+    the anchor would be rewritten to describe the shortened log and every later
+    verify would pass, erasing the removed record without trace."""
+
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    _truncate(log.path, 1)
+
+    with pytest.raises(AuditLogError, match="does not match its anchor"):
+        log.append(moderate_batch([payload(review_id="later")]).decisions)
+
+    # The tampering is still visible afterwards.
+    assert log.verify().valid is False
+
+
+def test_deleting_the_whole_log_is_refused_on_append(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    log.path.unlink()
+
+    with pytest.raises(AuditLogError, match="does not match its anchor"):
+        log.append(moderate_batch([payload(review_id="later")]).decisions)
+
+
+def test_appending_is_allowed_after_a_deliberate_re_anchor(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    _truncate(log.path, 1)
+    log.write_anchor()
+
+    assert log.append(moderate_batch([payload(review_id="later")]).decisions) == 1
+    assert log.verify().valid is True
+
+
+def test_normal_repeated_appends_still_work(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    for index in range(4):
+        log.append(moderate_batch([payload(review_id=f"r{index}")]).decisions)
+
+    status = log.verify()
+    assert status.valid is True
+    assert status.records == 4
+
+
+def test_corrupt_anchor_is_an_error_not_a_pass(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    log.anchor_path.write_text("{not json", encoding="utf-8")
+
+    assert log.verify().valid is False
+
+
+def test_anchor_rejects_nonsense_values(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+    log.anchor_path.write_text(
+        json.dumps({"records": -1, "head_hash": "a" * 32}), encoding="utf-8"
+    )
+
+    with pytest.raises(AuditLogError):
+        log.read_anchor()
+
+
+def test_anchor_write_is_atomic(tmp_path):
+    """No .tmp file is left behind, so a reader never sees a partial anchor."""
+
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(moderate_batch(batch()).decisions)
+
+    leftovers = list(tmp_path.glob("*.tmp"))
+    assert leftovers == []

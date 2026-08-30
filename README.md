@@ -303,6 +303,41 @@ Every decision records the policy version and digest, plus a digest of the
 review content, so a decision can be re-derived later and compared against
 what was actually served.
 
+#### What the audit log does and does not guarantee
+
+Each record carries the hash of the previous one, so **editing or deleting any
+earlier record** is detected, with the line number. A hash chain alone cannot
+see **truncation**, though: dropping records off the end leaves a shorter chain
+that is still internally consistent, and deleting your own most recent
+inconvenient decisions is the obvious insider attack.
+
+So the log is paired with an **anchor** — a sidecar recording how many records
+exist and the hash of the last one:
+
+- `verify` compares the log against the anchor and reports a shortfall.
+- `append` **refuses to extend a log that does not match its anchor**. Without
+  this, truncating and then appending would launder the deletion: the anchor
+  would be rewritten to describe the shortened log and every later verify would
+  pass.
+- When no anchor exists, `verify` reports that truncation *was not checked*
+  rather than reporting a pass. `--require-anchor` turns that into a failure.
+
+| Tampering | Detected |
+| --- | --- |
+| Edit a record's contents | Yes — `record contents do not match record_hash` |
+| Delete a record from the middle | Yes — `expected sequence N` |
+| Truncate the end of the log | Yes, via the anchor |
+| Truncate, then append new records | Yes — the append is refused |
+| Delete the log entirely | Yes, via the anchor |
+| Truncate *and* rewrite the anchor | **No** — see below |
+
+**The anchor is only as good as where you keep it.** Beside the log it raises
+the bar from one edit to two coordinated ones; that is an improvement, not a
+guarantee. Pass `--anchor` to place it on append-only or separately
+administered storage, which is what makes the check meaningful. Detection is
+also not prevention — that is a filesystem and access-control problem, not
+something a library can claim to solve.
+
 ### Usage
 
 ```bash
