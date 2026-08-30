@@ -40,8 +40,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    reviews = load_reviews(args.reviews_file)
-    scores = score_reviews(reviews)
+    try:
+        reviews = load_reviews(args.reviews_file)
+        scores = score_reviews(reviews)
+    except (OSError, json.JSONDecodeError, TypeError, KeyError) as exc:
+        print(f"Error: could not load or score reviews from "
+              f"{args.reviews_file}: {exc}", file=sys.stderr)
+        return 1
+
     print(format_report(scores))
 
     high_risk = sum(1 for s in scores if s.risk_level == "high")
