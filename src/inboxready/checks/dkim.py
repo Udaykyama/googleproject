@@ -67,13 +67,37 @@ class DkimKey:
             "selector": self.selector,
             "domain": self.domain,
             "fqdn": self.fqdn,
-            "raw": self.raw,
-            "tags": {k: (v if k != "p" else f"<{len(v)} base64 chars>") for k, v in self.tags.items()},
+            "raw": _elide_public_key(self.raw),
+            "tags": {
+                name: (value if name != "p" else _describe_key(value))
+                for name, value in self.tags.items()
+            },
             "key_type": self.key_type,
             "revoked": self.revoked,
             "testing": self.testing,
             "errors": list(self.errors),
         }
+
+
+def _describe_key(value: str) -> str:
+    """Summarise a public key so reports stay readable."""
+
+    return f"<{len(value)} base64 chars>" if value else ""
+
+
+def _elide_public_key(raw: str) -> str:
+    """Replace the ``p=`` value in a raw record with a short description.
+
+    DKIM public keys are public by definition, so this is purely so that JSON
+    and Markdown reports are not dominated by base64.
+    """
+
+    return re.sub(
+        r"(\bp\s*=\s*)([A-Za-z0-9+/=\s]*)",
+        lambda m: m.group(1) + _describe_key(re.sub(r"\s+", "", m.group(2))),
+        raw,
+        count=1,
+    )
 
 
 def parse_dkim_record(selector: str, domain: str, raw: str) -> DkimKey:

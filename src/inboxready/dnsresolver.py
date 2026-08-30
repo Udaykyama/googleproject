@@ -97,23 +97,31 @@ class Resolver(ABC):
     def __init__(self) -> None:
         self.query_count = 0
         self._cache: dict[tuple[str, str], list[str]] = {}
+        self._negative: set[tuple[str, str]] = set()
 
     def query(self, name: str, rrtype: str) -> list[str]:
         """Look up ``name``/``rrtype``, returning a list of string rdata.
 
-        Results (including negative results) are cached for the lifetime of the
-        resolver so that repeated SPF ``include:`` chains stay cheap and the
-        lookup counter reflects genuine network work.
+        Results are cached for the lifetime of the resolver so that repeated
+        SPF ``include:`` chains stay cheap and the lookup counter reflects
+        genuine network work. NXDOMAIN is cached too, since it is a definitive
+        answer; transient failures are not, so they can be retried.
         """
 
         rrtype = rrtype.upper()
         if rrtype not in SUPPORTED_RRTYPES:
             raise ValueError(f"unsupported rrtype: {rrtype}")
         key = (normalize_name(name), rrtype)
+        if key in self._negative:
+            raise NXDOMAIN(f"{key[0]} does not exist")
         if key in self._cache:
             return list(self._cache[key])
         self.query_count += 1
-        answers = self._lookup(key[0], rrtype)
+        try:
+            answers = self._lookup(key[0], rrtype)
+        except NXDOMAIN:
+            self._negative.add(key)
+            raise
         self._cache[key] = answers
         return list(answers)
 
