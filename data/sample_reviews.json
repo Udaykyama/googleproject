@@ -1,0 +1,56 @@
+[
+  {
+    "review_id": "r1",
+    "author": "alice_j",
+    "rating": 5,
+    "text": "I bought this coffee grinder last month and it has genuinely made my morning routine so much better. It grinds evenly and cleanup is quick.",
+    "verified_purchase": true,
+    "account_age_days": 820,
+    "date": "2024-03-01"
+  },
+  {
+    "review_id": "r2",
+    "author": "bot_reviewer_1",
+    "rating": 5,
+    "text": "Best product ever!!! Highly recommend!!!",
+    "verified_purchase": false,
+    "account_age_days": 1,
+    "date": "2024-03-02"
+  },
+  {
+    "review_id": "r3",
+    "author": "bot_reviewer_2",
+    "rating": 5,
+    "text": "Best product ever! Highly recommend!",
+    "verified_purchase": false,
+    "account_age_days": 2,
+    "date": "2024-03-02"
+  },
+  {
+    "review_id": "r4",
+    "author": "bot_reviewer_2",
+    "rating": 5,
+    "text": "AMAZING PRODUCT AMAZING SERVICE!!! WILL BUY AGAIN!!!",
+    "verified_purchase": false,
+    "account_age_days": 2,
+    "date": "2024-03-02"
+  },
+  {
+    "review_id": "r5",
+    "author": "bot_reviewer_2",
+    "rating": 1,
+    "text": "Terrible.",
+    "verified_purchase": false,
+    "account_age_days": 2,
+    "date": "2024-03-02"
+  },
+  {
+    "review_id": "r6",
+    "author": "mark_t",
+    "rating": 4,
+    "text": "Solid value for the price. Took a couple of weeks to arrive but customer support was responsive when I had a question about the warranty.",
+    "verified_purchase": true,
+    "account_age_days": 430,
+    "date": "2024-03-05"
+  }
+]
