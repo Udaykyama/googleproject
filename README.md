@@ -298,6 +298,7 @@ testable on its own:
 | `queue.py` | Persistent human-review queue with claim/resolve and overturn stats |
 | `audit.py` | Hash-chained decision log that can be verified and replayed |
 | `evaluation.py` | Precision/recall measurement and threshold sweeps |
+| `calibration.py` | Author-grouped splits, Wilson intervals, prevalence-adjusted precision |
 
 Every decision records the policy version and digest, plus a digest of the
 review content, so a decision can be re-derived later and compared against
@@ -349,6 +350,9 @@ python3 -m fake_review_detector.cli score data/sample_reviews.json
 
 # Measure precision/recall against labelled data
 python3 -m fake_review_detector.cli evaluate data/labelled_reviews.json
+
+# Ask whether the evidence supports changing the threshold
+python3 -m fake_review_detector.cli calibrate data/labelled_reviews.json
 
 # Work the human-review queue, and check the audit log is intact
 python3 -m fake_review_detector.cli score data/sample_reviews.json \
@@ -403,24 +407,87 @@ now all normalize to the same matching key and are caught. Homoglyph folding is
 applied only to words that *mix* scripts, so genuine non-Latin reviews are not
 mangled.
 
-**Accuracy**, against the 42 labelled reviews in `data/labelled_reviews.json`:
+**Accuracy**, against the 174 labelled reviews in `data/labelled_reviews.json`:
 
 ```
-precision 0.789   recall 1.000   f1 0.882   FPR 0.148
-TP 15  FP 4  TN 23  FN 0
+precision 0.780   recall 0.985   f1 0.871   FPR 0.165
+TP 64  FP 18  TN 91  FN 1
 ```
 
-That precision figure is the honest one. The labelled set includes hard
-negatives — genuine short reviews from new, unverified accounts — and one of
-them (`h02`, a real "Highly recommend.") scores **85**, higher than several
+That precision figure is the honest one for *this set*, and the next section
+explains why it is still optimistic for a real one. The labelled set includes
+hard negatives — genuine short reviews from new, unverified accounts — and one
+of them (`h02`, a real "Highly recommend.") scores **100**, higher than most
 actual fakes. Heuristics cannot separate those cases, which is exactly why the
 system enqueues for human review rather than deleting.
+
+#### Why this precision number will not survive contact with production
+
+Recall and false-positive rate are properties of the detector. Precision is a
+property of the detector *and the population it runs on*, and every published
+fake-review corpus — including this one, at 37% fake — is far more balanced
+than a real review stream, where the fake share is usually 5–20%.
+
+The same detector, unchanged, at different true prevalence:
+
+| Prevalence | Precision @ threshold 30 | Precision @ threshold 70 |
+|---|---|---|
+| 37% (this dataset) | 0.78 | 0.96 |
+| 20% | 0.60 | 0.92 |
+| 10% | 0.40 | 0.84 |
+| 5% | **0.24** | 0.71 |
+
+At the default threshold on a 5%-fake stream, roughly **three of every four
+flagged reviews would be genuine**. Nothing about the code changed between
+those rows. This is the single most important caveat in this README, and it is
+invisible if you only ever look at the balanced evaluation set.
+
+`calibrate` reports this projection using the *upper* confidence bound on the
+false-positive rate, so a test split that happens to contain zero false
+positives cannot be read as a promise of zero false positives in production.
+
+### Calibrating the threshold
+
+```bash
+python3 -m fake_review_detector.cli calibrate data/labelled_reviews.json
+```
+
+The command splits the labelled data **by author**, picks a threshold on the
+training half, and reports it on the held-out half. Splitting by author rather
+than by review is deliberate: fake reviews arrive in bursts from one account,
+so a per-review split puts one farm's output on both sides and scores the
+detector on text it has effectively already seen.
+
+It exits non-zero unless the evidence supports a change, and on the current
+dataset it always will:
+
+```
+VERDICT: threshold 65 looks better than 30, but the test split is too small to
+act on. Treat this as a reason to collect more labelled data, not as a licence
+to change the default.
+```
+
+This is the intended behaviour, not a limitation to work around. Threshold 65
+does look better here, but with 95 test reviews the confidence intervals are
+wide enough that the ranking could easily reverse on different data — and
+`medium_threshold` also drives risk banding, so it is not a free knob. The
+default stays at 30 until there is data that can justify moving it.
+
+To get such data, `data/README.md` lists the public corpora, their sizes, and
+— importantly — their licences. Only one of the six is redistributable, which
+is why none are vendored here.
 
 ### Limitations
 
 - **Heuristics, not ground truth.** Nothing here proves a review is fake. At
-  the default threshold roughly one in seven genuine reviews in the labelled
-  set is flagged, so output is a work queue, not a verdict.
+  the default threshold roughly one in six genuine reviews in the labelled set
+  is flagged, so output is a work queue, not a verdict.
+- **The labelled set cannot validate this detector.** All 174 reviews were
+  hand-written for this repository by the same author who wrote the rules, so
+  they encode one person's idea of what a fake review looks like. Its honest
+  purpose is regression testing — catching the day a change stops detecting
+  something it used to. Treat the accuracy numbers as a floor on a friendly
+  set, never as evidence of field performance.
 - **Auto-removal is off by default.** `Policy.allow_auto_removal` is `False`,
   and `action_for()` downgrades a removal to an enqueue unless it is explicitly
   enabled. The `h02` case above is why.
@@ -429,8 +496,16 @@ system enqueues for human review rather than deleting.
 - **Single-process queue and log.** Both are file-backed and assume one writer;
   they demonstrate the mechanism, not a distributed deployment.
 - **Duplicate pair lists are capped** in dense clusters, as described above.
-- **English-centric phrase list.** Normalization is script-aware, but the
-  templated-phrase table itself is English.
+- **The phrase table covers 15 languages, not all of them.** A farm operating
+  in an untranslated language still evades the phrase signal, though the
+  duplicate, burst and account-age signals remain language-independent. Entries
+  deliberately exclude bare praise like "good product": an early draft included
+  the Russian "отличный товар", which flags the entirely ordinary review
+  "Отличный товар, доставка быстрая".
+- **Language attribution in evidence is approximate.** The evasion defence that
+  folds "Bessst" to "best" also folds Spanish "estrellas" to "estrelas", so
+  closely related languages can cross-attribute. The phrase match is still
+  correct; only the reported language may be.
 
 ### Project layout
 
@@ -438,7 +513,8 @@ system enqueues for human review rather than deleting.
 - `fake_review_detector/detector.py` — compatibility shim for the original API
 - `fake_review_detector/cli.py` — command-line entry point
 - `data/sample_reviews.json` — example batch of genuine + fake reviews
-- `data/labelled_reviews.json` — 42 labelled reviews used for evaluation
+- `data/labelled_reviews.json` — 174 labelled reviews used for evaluation
+- `data/README.md` — provenance of that set, and where to obtain real corpora
 - `tests/` — unit tests, including `test_production_hardening.py`, which pins
   each measured gap above as a regression test
 - `RESEARCH.md` — the research behind the problem this project showcases

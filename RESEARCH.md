@@ -394,7 +394,7 @@ The package was therefore extended into a moderation system proper:
   explained after the fact cannot be appealed.
 - **Removal is not automatic.** Measuring against labelled data — including
   hard negatives — showed a genuine review ("Highly recommend.", new
-  unverified account) scoring 85, above several real fakes. That is a
+  unverified account) scoring 100, above most real fakes. That is a
   structural limit of text heuristics, not a tuning error, so high-scoring
   reviews are enqueued for human review rather than deleted. This mirrors
   Google's own framing when it retired Postmaster Tools' reputation scores in
@@ -406,4 +406,62 @@ The package was therefore extended into a moderation system proper:
   a bomb of n identical reviews genuinely contains a quadratic number of true
   duplicate pairs.
 
+### The measurement problem
+
+Building the detector was the easy half. Establishing whether it *works* ran
+into two findings that constrain what any honest accuracy claim can say.
+
+**Every public corpus is either unusable or unredistributable.** Six datasets
+are commonly cited in this literature. Five cannot be redistributed: the Ott and
+Pérez-Rosas corpora are research-only pending author permission, the Yelp
+datasets (YelpChi, YelpNYC, YelpZip) additionally sit under Yelp's terms of
+service, and the McAuley Amazon dumps carry no explicit licence. Only
+AiGen-FoodReview is MIT-licensed. That is why this repository vendors none of
+them and ships a hand-written set instead — a set which, being written by the
+same author as the rules, can only serve as a regression harness.
+
+Their labels are also weaker than they appear. The Ott and Pérez-Rosas "fakes"
+are essays written to a prompt by paid crowdworkers, so a classifier may be
+learning the register of paid writing rather than deception; the Yelp sets use
+Yelp's own filter output as ground truth, so a model trained on them learns to
+imitate that filter, mistakes included.
+
+**Balanced datasets systematically overstate precision.** Every corpus above
+sits at or near 50/50, because balanced data is easier to learn from and to
+publish. Real fake-review prevalence is roughly 5–20%. Precision — unlike recall
+and false-positive rate — depends on that base rate, and collapses as it falls:
+this detector measures 0.78 precision on its own 37%-fake set and would be at
+0.24 on a 5%-fake stream, without a line of code changing. Three of every four
+flags would be wrong.
+
+This reframed the calibration work. A threshold sweep on the labelled set
+prefers 70 over the default 30, at four times fewer false positives and no
+recall cost — a tempting one-line change. But with 174 reviews the confidence
+intervals are far too wide to support it, and `medium_threshold` also drives
+risk banding, so it is not a free knob. What shipped is therefore the
+*machinery* for calibrating honestly — author-grouped splits so a farm's output
+cannot straddle train and test, Wilson intervals so a small sample cannot look
+decisive, and a recommendation that stays blocked while the split is
+underpowered — together with a documented path to real data. The default
+threshold is unchanged, and CI asserts that the tool still refuses to recommend
+changing it.
+
 `README.md` records the measured numbers, and the limitations that remain.
+`data/README.md` records what the labelled set can and cannot be used for.
+
+### Sources — labelled corpora
+
+- Ott, Choi, Cardie, Hancock, "Finding Deceptive Opinion Spam by Any Stretch of
+  the Imagination", ACL 2011 — <https://aclanthology.org/P11-1032/>
+- Ott, Cardie, Hancock, "Negative Deceptive Opinion Spam", NAACL 2013 —
+  <https://aclanthology.org/N13-1053/>
+- Mukherjee, Venkataraman, Liu, Glance, "What Yelp Fake Review Filter Might Be
+  Doing?", ICWSM 2013 — <https://ojs.aaai.org/index.php/ICWSM/article/view/14389>
+- Rayana, Akoglu, "Collective Opinion Spam Detection", KDD 2015 —
+  <https://dl.acm.org/doi/10.1145/2783258.2783370>
+- Ni, Li, McAuley, "Justifying Recommendations using Distantly-Labeled Reviews",
+  EMNLP 2019 — <https://aclanthology.org/D19-1018/>
+- Gambetti, Han, "AiGen-FoodReview", ICWSM 2024 (MIT licensed) —
+  <https://github.com/iamalegambetti/aigen-foodreview>
+- Pérez-Rosas, Mihalcea, "Experiments in Open Domain Deception Detection",
+  EMNLP 2015 — <https://aclanthology.org/D15-1133/>
