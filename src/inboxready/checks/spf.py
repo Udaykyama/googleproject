@@ -412,10 +412,15 @@ def check_spf(resolver: Resolver, domain: str, expand: bool = True) -> CheckResu
                 )
             )
         elif lookups >= MAX_DNS_LOOKUPS - 1:
+            at_limit = lookups == MAX_DNS_LOOKUPS
             result.add(
                 Finding(
                     code="SPF_LOOKUPS_NEAR_LIMIT",
-                    title="SPF is close to the DNS-lookup limit",
+                    title=(
+                        "SPF is at the DNS-lookup limit"
+                        if at_limit
+                        else "SPF is close to the DNS-lookup limit"
+                    ),
                     severity=Severity.WARNING,
                     detail=(
                         f"{lookups} of {MAX_DNS_LOOKUPS} lookups are used. Any provider that "

@@ -153,7 +153,7 @@ Suitable for CI:
 
 ## What it checks
 
-88 distinct finding codes across seven checks. Every finding carries a severity,
+91 distinct finding codes across seven checks. Every finding carries a severity,
 an explanation, a concrete fix, and the standard it derives from.
 
 **SPF** (RFC 7208) — record present and unique, syntax, `+all` / `?all` / missing
@@ -218,7 +218,7 @@ informational because Gmail does not require it.
 python3 -m unittest discover -s tests -t tests
 ```
 
-221 tests, no test dependencies, runs in well under a second.
+226 tests, no test dependencies, runs in well under a second.
 
 ```
 src/inboxready/

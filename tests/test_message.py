@@ -200,6 +200,36 @@ class UnsubscribeTests(unittest.TestCase):
         )
         codes = finding_codes(check_message(raw))
         self.assertIn("MSG_UNSUBSCRIBE_NOT_HTTPS", codes)
+        # An http-only header has no mailto:, so claiming "mailto only" would be wrong.
+        self.assertNotIn("MSG_UNSUBSCRIBE_MAILTO_ONLY", codes)
+        self.assertNotIn("MSG_UNSUBSCRIBE_NO_WEB_URI", codes)
+
+    def test_unusable_scheme_reports_no_web_uri(self):
+        raw = build(
+            self.BASE
+            + "List-Unsubscribe: <ftp://example.com/u>\n"
+            + "List-Unsubscribe-Post: List-Unsubscribe=One-Click"
+        )
+        codes = finding_codes(check_message(raw))
+        self.assertIn("MSG_UNSUBSCRIBE_NO_WEB_URI", codes)
+        self.assertNotIn("MSG_UNSUBSCRIBE_MAILTO_ONLY", codes)
+
+    def test_http_plus_mailto_is_not_reported_as_mailto_only(self):
+        raw = build(
+            self.BASE
+            + "List-Unsubscribe: <http://example.com/u>, <mailto:u@example.com>\n"
+            + "List-Unsubscribe-Post: List-Unsubscribe=One-Click"
+        )
+        codes = finding_codes(check_message(raw))
+        self.assertIn("MSG_UNSUBSCRIBE_NOT_HTTPS", codes)
+        self.assertNotIn("MSG_UNSUBSCRIBE_MAILTO_ONLY", codes)
+
+    def test_missing_post_header_is_still_reported_alongside_http(self):
+        # Two independent defects; fixing the scheme alone would not make this compliant.
+        raw = build(self.BASE + "List-Unsubscribe: <http://example.com/u>")
+        codes = finding_codes(check_message(raw))
+        self.assertIn("MSG_UNSUBSCRIBE_NOT_HTTPS", codes)
+        self.assertIn("MSG_NO_ONE_CLICK_POST", codes)
 
     def test_missing_one_click_post_is_a_blocker(self):
         raw = build(self.BASE + "List-Unsubscribe: <https://example.com/u>")

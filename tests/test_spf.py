@@ -150,9 +150,39 @@ class SpfCheckTests(unittest.TestCase):
             "i3.example": {"TXT": ["v=spf1 a mx -all"]},
         }
         result = check_spf(StaticResolver(zone), "example.com")
+        # RFC 7208 §4.6.4 permits "at most 10", so 10 passes but has no headroom.
         self.assertEqual(result.data["dns_lookups"], 10)
         self.assertIn("SPF_LOOKUPS_NEAR_LIMIT", finding_codes(result))
         self.assertNotIn("SPF_TOO_MANY_LOOKUPS", finding_codes(result))
+        finding = next(f for f in result.findings if f.code == "SPF_LOOKUPS_NEAR_LIMIT")
+        self.assertEqual(finding.title, "SPF is at the DNS-lookup limit")
+
+    def test_nine_lookups_reads_as_close_to_the_limit(self):
+        zone = {
+            "example.com": {
+                "TXT": ["v=spf1 a mx a:extra.example include:i1.example -all"]
+            },
+            "i1.example": {"TXT": ["v=spf1 a mx include:i2.example -all"]},
+            "i2.example": {"TXT": ["v=spf1 a mx -all"]},
+        }
+        result = check_spf(StaticResolver(zone), "example.com")
+        self.assertEqual(result.data["dns_lookups"], 9)
+        finding = next(f for f in result.findings if f.code == "SPF_LOOKUPS_NEAR_LIMIT")
+        self.assertEqual(finding.title, "SPF is close to the DNS-lookup limit")
+
+    def test_exceeding_the_limit_replaces_the_near_limit_warning(self):
+        zone = {
+            "example.com": {
+                "TXT": ["v=spf1 a mx include:i1.example include:i2.example -all"]
+            },
+            "i1.example": {"TXT": ["v=spf1 a mx include:i3.example -all"]},
+            "i2.example": {"TXT": ["v=spf1 a mx -all"]},
+            "i3.example": {"TXT": ["v=spf1 a mx -all"]},
+        }
+        result = check_spf(StaticResolver(zone), "example.com")
+        self.assertEqual(result.data["dns_lookups"], 11)
+        self.assertIn("SPF_TOO_MANY_LOOKUPS", finding_codes(result))
+        self.assertNotIn("SPF_LOOKUPS_NEAR_LIMIT", finding_codes(result))
 
     def test_include_loop_is_detected_and_terminates(self):
         resolver = StaticResolver(

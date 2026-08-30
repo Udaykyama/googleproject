@@ -478,7 +478,7 @@ def _check_unsubscribe(parsed: ParsedMessage, result: CheckResult, bulk: bool) -
             )
         )
 
-    if not https_uris:
+    if not https_uris and not http_uris and mailto_uris:
         result.add(
             Finding(
                 code="MSG_UNSUBSCRIBE_MAILTO_ONLY",
@@ -492,7 +492,21 @@ def _check_unsubscribe(parsed: ParsedMessage, result: CheckResult, bulk: bool) -
                 reference="Google sender guidelines; RFC 8058 §3.1",
             )
         )
-    elif not mailto_uris:
+    elif not https_uris and not http_uris:
+        result.add(
+            Finding(
+                code="MSG_UNSUBSCRIBE_NO_WEB_URI",
+                title="Unsubscribe offers no HTTPS URI",
+                severity=Severity.BLOCKER,
+                detail=(
+                    f"None of {uris} is an http(s) or mailto: URI, so there is nothing Gmail "
+                    "can POST a one-click unsubscribe to."
+                ),
+                remediation="Add an '<https://...>' URI to the header.",
+                reference="Google sender guidelines; RFC 8058 §3.1",
+            )
+        )
+    elif https_uris and not mailto_uris:
         result.add(
             Finding(
                 code="MSG_UNSUBSCRIBE_NO_MAILTO",
