@@ -211,8 +211,10 @@ def condensed_key(text: str) -> str:
 def word_shingles(text: str, size: int = 3) -> set[str]:
     """Return the set of overlapping ``size``-word shingles of ``text``.
 
-    Operates on :func:`matching_key` output, so shingling is already immune to
-    the evasions above. Texts shorter than ``size`` words yield a single shingle
+    Accepts raw text and applies :func:`matching_key` itself, so shingling is
+    immune to the evasions above without the caller doing anything. Passing
+    already-normalized text is also safe, because :func:`matching_key` is
+    idempotent. Texts shorter than ``size`` words yield a single shingle
     covering the whole text, so short reviews still compare meaningfully.
     """
 

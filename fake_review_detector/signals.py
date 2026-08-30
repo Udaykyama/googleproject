@@ -22,6 +22,7 @@ __all__ = [
     "evaluate_review",
     "is_generic",
     "is_shouty",
+    "matched_phrases",
 ]
 
 #: Templated phrases common in paid and bulk-generated reviews.
