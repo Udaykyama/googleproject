@@ -1,0 +1,25 @@
+From: "Example Shop Billing <billing@example-shop.com>" <deals@deals.example-shop.test>
+To: customer@gmail.com
+Reply-To: support@third-party-helpdesk.test
+Subject: RE: Your order is waiting - 70% off today only
+Date: Tue, 13 Jan 2026 09:15:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Precedence: bulk
+List-Unsubscribe: <mailto:unsubscribe@deals.example-shop.test>
+Authentication-Results: mx.google.com; spf=softfail (google.com: domain of transitioning bounce@esp-shared.test does not designate 203.0.113.25 as permitted sender) smtp.mailfrom=bounce@esp-shared.test; dkim=pass header.i=@esp-shared.test; dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=deals.example-shop.test
+DKIM-Signature: v=1; a=rsa-sha1; c=relaxed/relaxed; d=esp-shared.test;
+ s=mail; t=1768295700; l=2048;
+ h=from:to:mime-version:content-type;
+ bh=2jmj7l5rSw0yVb-vlWAYkK-YBwk=;
+ b=Wm9vbSBmYWtlIHNpZ25hdHVyZSBieXRlcyBmb3IgdGhlIGV4YW1wbGUgbWVzc2FnZQ==
+
+<html>
+  <body>
+    <h1>70% off - today only!</h1>
+    <p>Your cart is still waiting. <a href="https://deals.example-shop.test/cart">Check out now</a>.</p>
+    <p style="font-size:8px;color:#eeeeee">
+      To stop receiving these, reply to this email with the word STOP.
+    </p>
+  </body>
+</html>

@@ -1,0 +1,41 @@
+From: Example Good <news@mail.example-good.test>
+To: customer@gmail.com
+Subject: Your January product update
+Date: Tue, 13 Jan 2026 09:15:00 +0000
+Message-ID: <20260113091500.a41f9c2e@mail.example-good.test>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b=_boundary_20260113"
+Precedence: bulk
+List-Id: Product updates <news.mail.example-good.test>
+List-Unsubscribe: <https://mail.example-good.test/u/9f2c1a4e7b>, <mailto:unsubscribe@mail.example-good.test?subject=unsub-9f2c1a4e7b>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+Authentication-Results: mx.google.com; spf=pass (google.com: domain of bounce@mail.example-good.test designates 198.51.100.25 as permitted sender) smtp.mailfrom=bounce@mail.example-good.test; dkim=pass header.i=@mail.example-good.test; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=mail.example-good.test
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=mail.example-good.test;
+ s=google; t=1768295700;
+ h=from:to:subject:date:message-id:mime-version:list-unsubscribe;
+ bh=2jmj7l5rSw0yVb-vlWAYkK-YBwk=;
+ b=RXhhbXBsZSBzaWduYXR1cmUgYnl0ZXMgZm9yIHRoZSBjb21wbGlhbnQgc2FtcGxlIG1zZw==
+
+--b=_boundary_20260113
+Content-Type: text/plain; charset=utf-8
+
+Your January product update
+
+We shipped faster exports and a new audit log this month.
+Read more: https://mail.example-good.test/updates/january
+
+Unsubscribe: https://mail.example-good.test/u/9f2c1a4e7b
+
+--b=_boundary_20260113
+Content-Type: text/html; charset=utf-8
+
+<html>
+  <body>
+    <h1>Your January product update</h1>
+    <p>We shipped faster exports and a new audit log this month.</p>
+    <p><a href="https://mail.example-good.test/updates/january">Read more</a></p>
+    <p><a href="https://mail.example-good.test/u/9f2c1a4e7b">Unsubscribe</a></p>
+  </body>
+</html>
+
+--b=_boundary_20260113--
