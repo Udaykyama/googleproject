@@ -222,7 +222,7 @@ python3 -m unittest discover -s tests -t tests
 
 226 tests for InboxReady, no test dependencies, runs in well under a second.
 
-The repository as a whole has 578 tests, covering the review detector and the
+The repository as a whole has 579 tests, covering the review detector and the
 optional web UI too. Those are written as plain pytest functions, which
 `unittest` does not collect, so run the full suite with:
 

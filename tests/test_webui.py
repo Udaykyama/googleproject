@@ -385,6 +385,39 @@ def test_an_object_wrapper_is_accepted():
     assert service.parse('{"reviews": [{"review_id": "r1", "text": "hi"}]}')
 
 
+def test_an_invalid_review_is_reported_without_stopping_the_batch(client):
+    """One bad row must not cost the operator the other nineteen."""
+
+    batch = json.dumps(
+        [
+            {
+                "review_id": "ok1",
+                "author": "a",
+                "rating": 5,
+                "text": "Great value for the price, and it arrived quickly.",
+                "date": "2024-01-01",
+            },
+            {
+                "review_id": "bad1",
+                "author": "b",
+                "rating": 99,
+                "text": "x",
+                "date": "2024-01-01",
+            },
+        ]
+    )
+    response = client.post(
+        "/reviews", data={"csrf_token": token(client, "/reviews"), "reviews": batch}
+    )
+    body = " ".join(response.get_data(as_text=True).split())
+    assert response.status_code == 200
+    assert "1 review(s) scored" in body
+    assert "1 rejected as invalid" in body
+    assert "rating must be between 1 and 5, got 99" in body
+    # The message already names the review, so the row must not repeat it.
+    assert "review_id=" not in body
+
+
 # -- the queue -----------------------------------------------------------
 
 

@@ -78,7 +78,11 @@
         <h3>Rejected before scoring</h3>
         <ul>
           {% for error in result.errors %}
-            <li><code>{{ error.review_id or '(no id)' }}</code>: {{ error }}</li>
+            <li>
+              <code>{{ error.review_id or '(no id)' }}</code>
+              {%- if error.field %} <code>{{ error.field }}</code>{% endif %}:
+              {{ error.args[0] }}
+            </li>
           {% endfor %}
         </ul>
       </section>
