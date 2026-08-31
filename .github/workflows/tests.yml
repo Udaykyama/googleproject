@@ -122,3 +122,92 @@ jobs:
               --selector google || test $? -eq 1
         env:
           PYTHONPATH: src
+
+  web-smoke:
+    # The web tests use Flask's test client, which bypasses the WSGI server.
+    # This boots the real thing and talks to it over a socket, so a broken
+    # deployment is caught here rather than after it is deployed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the package with the web extra
+        # Installing rather than running from the checkout also proves the
+        # templates and stylesheet are actually packaged.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[web]"
+
+      - name: Boot the app
+        run: |
+          python -m webui > /tmp/webui.log 2>&1 &
+          echo $! > /tmp/webui.pid
+          for _ in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8000/healthz > /dev/null 2>&1; then
+              echo "app is up"
+              exit 0
+            fi
+            sleep 0.25
+          done
+          echo "::error::the app did not start"
+          cat /tmp/webui.log
+          exit 1
+        env:
+          SECRET_KEY: ci-smoke-test-not-a-real-secret
+          DEMO_DIR: examples
+
+      - name: Every page must render
+        run: |
+          for path in / /inbox /reviews /queue /healthz; do
+            code=$(curl -s -o /tmp/body -w '%{http_code}' "http://127.0.0.1:8000$path")
+            test "$code" = "200" || {
+              echo "::error::$path returned $code"
+              cat /tmp/body
+              exit 1
+            }
+            echo "$path 200"
+          done
+
+      - name: A fixture audit must return the same verdict as the CLI
+        # The web layer renders what the library returns. If those two ever
+        # disagree, the UI is lying about a domain's compliance.
+        run: |
+          jar=/tmp/cookies
+          token=$(curl -s -c $jar http://127.0.0.1:8000/inbox \
+            | grep -o 'name="csrf_token" value="[^"]*"' \
+            | head -1 | sed 's/.*value="//; s/"//')
+          test -n "$token" || { echo "::error::no CSRF token rendered"; exit 1; }
+          curl -s -b $jar -c $jar -o /tmp/audit.html \
+            --data-urlencode "csrf_token=$token" \
+            --data-urlencode "mode=fixture" \
+            --data-urlencode "fixture=failing-sender" \
+            --data-urlencode "domain=deals.example-shop.test" \
+            --data-urlencode "selectors=google legacy" \
+            --data-urlencode "ips=203.0.113.25" \
+            --data-urlencode "daily_volume=1200000" \
+            --data-urlencode "spam_rate=0.42" \
+            http://127.0.0.1:8000/inbox
+          grep -q "Score 0/100" /tmp/audit.html
+          grep -q "SPF_TOO_MANY_LOOKUPS" /tmp/audit.html
+          echo "audit matched the command-line verdict"
+
+      - name: A forged form must be rejected
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            --data-urlencode "domain=example.test" \
+            http://127.0.0.1:8000/inbox)
+          test "$code" = "400" || {
+            echo "::error::a request with no CSRF token returned $code"
+            exit 1
+          }
+          echo "CSRF check held"
+
+      - name: Stop the app
+        if: always()
+        run: |
+          if [ -f /tmp/webui.pid ]; then kill "$(cat /tmp/webui.pid)" || true; fi
+          cat /tmp/webui.log || true

@@ -165,6 +165,11 @@ class ReviewQueue:
             added += 1
         return added
 
+    def items(self) -> list[QueueItem]:
+        """Every item, highest priority first, whatever its state."""
+
+        return self._ordered()
+
     def pending(self) -> list[QueueItem]:
         return [i for i in self._ordered() if i.state is QueueState.PENDING]
 

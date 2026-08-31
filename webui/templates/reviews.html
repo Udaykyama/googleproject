@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}Review moderation{% endblock %}
+
+{% block content %}
+<h1>Review moderation</h1>
+<p class="lede">
+  Score a batch of reviews for the signals that betray a review farm, and see
+  exactly which signal fired on each one.
+</p>
+
+{% if error %}
+  <p class="flash flash-error" role="alert">{{ error }}</p>
+{% endif %}
+
+<form method="post" enctype="multipart/form-data" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+  <label>
+    Reviews, as a JSON array
+    <textarea name="reviews" rows="12" spellcheck="false"
+              placeholder='[{"review_id": "1", "author": "alice", "rating": 5, "text": "…", "verified_purchase": true, "account_age_days": 500, "date": "2024-01-01"}]'>{{ pasted }}</textarea>
+    <span class="hint">
+      At most {{ app_config.max_reviews }} reviews per batch here; the
+      command-line tool has no limit.
+      {% if sample_available %}
+        <a href="{{ url_for('ui.reviews', sample=1) }}">Load the bundled sample.</a>
+      {% endif %}
+    </span>
+  </label>
+
+  <label>
+    …or upload the JSON file
+    <input type="file" name="batch" accept=".json,application/json">
+    <span class="hint">
+      Read in memory, never written to disk and never logged.
+    </span>
+  </label>
+
+  <label class="choice">
+    <input type="checkbox" name="enqueue" value="1"
+           {% if form.get('enqueue') %}checked{% endif %}>
+    Send anything needing human review to the queue
+    {% if not app_config.persistent %}
+      <span class="hint">(held in memory only — lost on restart)</span>
+    {% endif %}
+  </label>
+
+  <button type="submit" class="button">Score the batch</button>
+</form>
+
+{% if result %}
+  {% set actions = result.by_action() %}
+  <section class="result">
+    <h2>{{ result.accepted }} review(s) scored</h2>
+    <p class="counts">
+      <span class="pill">{{ actions['allow'] }} allowed</span>
+      <span class="pill">{{ actions['monitor'] }} monitored</span>
+      <span class="pill sev-warning">{{ actions['enqueue'] }} for human review</span>
+      <span class="pill sev-blocker">{{ actions['remove'] }} removed</span>
+      {% if result.rejected %}
+        <span class="pill sev-critical">{{ result.rejected }} rejected as invalid</span>
+      {% endif %}
+    </p>
+    <p class="hint">
+      Policy {{ result.policy_version }} ({{ result.policy_digest[:12] }}).
+      {% if result.duplicate_report %}
+        Duplicate detection: {{ result.duplicate_report.pairs | length }} pair(s)
+        via {{ result.duplicate_report.mode }}.
+        {% if result.duplicate_report.truncated %}
+          Pair lists were capped — the cluster is denser than the report shows.
+        {% endif %}
+      {% endif %}
+      {% if queued %}Queued {{ queued }} item(s) for human review.{% endif %}
+    </p>
+
+    {% if result.errors %}
+      <section class="check">
+        <h3>Rejected before scoring</h3>
+        <ul>
+          {% for error in result.errors %}
+            <li>
+              <code>{{ error.review_id or '(no id)' }}</code>
+              {%- if error.field %} <code>{{ error.field }}</code>{% endif %}:
+              {{ error.args[0] }}
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% endif %}
+
+    <table class="decisions">
+      <thead>
+        <tr><th>Review</th><th>Score</th><th>Risk</th><th>Action</th><th>Signals</th></tr>
+      </thead>
+      <tbody>
+        {% for decision in result.decisions %}
+          <tr>
+            <td><code>{{ decision.review_id }}</code></td>
+            <td class="numeric">{{ decision.score }}</td>
+            <td><span class="pill risk-{{ decision.risk_level.value }}">{{ decision.risk_level.value }}</span></td>
+            <td><span class="pill action-{{ decision.action.value }}">{{ decision.action.value }}</span></td>
+            <td>
+              {% if decision.signals %}
+                <details>
+                  <summary>{{ decision.signals | length }} signal(s)</summary>
+                  <ul class="signals">
+                    {% for signal in decision.signals %}
+                      <li>
+                        <code>{{ signal.code }}</code> (+{{ signal.weight }})
+                        — {{ signal.message }}
+                        {% if signal.evidence %}
+                          <pre>{{ signal.evidence | pretty_json }}</pre>
+                        {% endif %}
+                      </li>
+                    {% endfor %}
+                  </ul>
+                </details>
+              {% else %}
+                <span class="hint">none</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <p class="hint">
+      A high score is a reason to look, not a finding of fact. In the bundled
+      labelled set roughly one genuine review in six scores above the threshold,
+      which is why uncertain items are queued rather than removed.
+    </p>
+  </section>
+{% endif %}
+{% endblock %}

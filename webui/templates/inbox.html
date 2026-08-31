@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title %}InboxReady{% endblock %}
+
+{% block content %}
+<h1>InboxReady</h1>
+<p class="lede">
+  Check whether a sending domain and campaign would pass Gmail's bulk-sender
+  requirements, before Gmail decides.
+</p>
+
+{% if error %}
+  <p class="flash flash-error" role="alert">{{ error }}</p>
+{% endif %}
+
+<form method="post" enctype="multipart/form-data" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+  <fieldset>
+    <legend>DNS source</legend>
+    {% for mode in modes %}
+      <label class="choice">
+        <input type="radio" name="mode" value="{{ mode }}"
+               {% if form.get('mode') == mode or (not form.get('mode') and loop.first) %}checked{% endif %}>
+        {% if mode == 'fixture' %}Bundled demo fixture — no network access
+        {% elif mode == 'offline' %}Message only — no DNS at all
+        {% else %}Live DNS — resolves the real domain
+        {% endif %}
+      </label>
+    {% endfor %}
+    {% if not fixtures %}
+      <p class="hint">
+        No demo fixtures are installed, so only a message-only audit is
+        available. Run the app from a repository checkout, or point
+        <code>DEMO_DIR</code> at the <code>examples</code> directory.
+      </p>
+    {% endif %}
+    {% if not app_config.live_dns %}
+      <p class="hint">
+        Live DNS is disabled here. Set <code>LIVE_DNS=1</code> when running the
+        app locally to audit a domain you own.
+      </p>
+    {% endif %}
+  </fieldset>
+
+  <label>
+    Domain
+    <input type="text" name="domain" inputmode="url" autocomplete="off"
+           spellcheck="false" maxlength="253"
+           placeholder="mail.example.com"
+           value="{{ form.get('domain', '') }}">
+    <span class="hint">A hostname, not a URL or an email address.</span>
+  </label>
+
+  {% if fixtures %}
+    <label>
+      Demo fixture
+      <select name="fixture">
+        {% for name in fixtures %}
+          <option value="{{ name }}" {% if form.get('fixture') == name %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+      <span class="hint">
+        Used when the DNS source above is a fixture. <code>failing-sender</code>
+        pairs with <code>deals.example-shop.test</code>;
+        <code>compliant-sender</code> with <code>mail.example-good.test</code>.
+      </span>
+    </label>
+  {% endif %}
+
+  <div class="row">
+    <label>
+      DKIM selectors
+      <input type="text" name="selectors" autocomplete="off" spellcheck="false"
+             placeholder="google legacy" value="{{ form.get('selectors', '') }}">
+      <span class="hint">Space or comma separated. Blank probes common ones.</span>
+    </label>
+    <label>
+      Sending IPs
+      <input type="text" name="ips" autocomplete="off" spellcheck="false"
+             placeholder="203.0.113.25" value="{{ form.get('ips', '') }}">
+      <span class="hint">Checked for forward-confirmed reverse DNS.</span>
+    </label>
+  </div>
+
+  <div class="row">
+    <label>
+      Messages per day to Gmail
+      <input type="text" name="daily_volume" inputmode="numeric"
+             placeholder="120000" value="{{ form.get('daily_volume', '') }}">
+      <span class="hint">Bulk-sender status begins at 5,000.</span>
+    </label>
+    <label>
+      Spam complaint rate (%)
+      <input type="text" name="spam_rate" inputmode="decimal"
+             placeholder="0.08" value="{{ form.get('spam_rate', '') }}">
+      <span class="hint">From Postmaster Tools. Google's limit is 0.30%.</span>
+    </label>
+  </div>
+
+  <label>
+    Campaign message (optional)
+    <input type="file" name="message" accept=".eml,message/rfc822,text/plain">
+    <span class="hint">
+      Read in memory, never written to disk and never logged. Up to
+      {{ (app_config.max_upload_bytes / 1024) | round | int }} KB.
+    </span>
+  </label>
+
+  {% if messages %}
+    <label>
+      …or use a bundled example message
+      <select name="demo_message">
+        <option value="">None</option>
+        {% for name in messages %}
+          <option value="{{ name }}" {% if form.get('demo_message') == name %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  {% endif %}
+
+  <label class="choice">
+    <input type="checkbox" name="transactional" value="1"
+           {% if form.get('transactional') %}checked{% endif %}>
+    Transactional, not bulk — skips the unsubscribe requirements
+  </label>
+
+  <button type="submit" class="button">Run the audit</button>
+</form>
+
+{% if report %}
+  {% set counts = report.counts() %}
+  <section class="result">
+    <h2>{{ report.target }}</h2>
+    <p class="verdict {{ 'ok' if report.gmail_ready else 'bad' }}">
+      Score {{ report.score }}/100 — Gmail bulk-sender status:
+      {{ 'READY' if report.gmail_ready else 'NOT READY' }}
+    </p>
+    <p class="counts">
+      {% for label in ['blocker', 'critical', 'warning', 'info'] %}
+        <span class="pill sev-{{ label }}">{{ label }} {{ counts[label] }}</span>
+      {% endfor %}
+      {% if request_summary and request_summary.mode == 'fixture' %}
+        <span class="pill">fixture: {{ request_summary.fixture }}</span>
+      {% elif request_summary and request_summary.mode == 'offline' %}
+        <span class="pill">message only</span>
+      {% else %}
+        <span class="pill">live DNS</span>
+      {% endif %}
+      {% if report.context.get('dns_queries') is not none %}
+        <span class="pill">{{ report.context['dns_queries'] }} DNS queries</span>
+      {% endif %}
+    </p>
+
+    {% if report.context.get('organizational_domain') %}
+      <p class="hint">
+        Organizational domain: <code>{{ report.context['organizational_domain'] }}</code>
+      </p>
+    {% endif %}
+
+    {% for check in report.results %}
+      <section class="check">
+        <h3>{{ check.name }} <span class="pill sev-{{ check.worst.label }}">{{ check.worst.label }}</span></h3>
+        {% if check.skipped_reason %}
+          <p class="hint">Skipped: {{ check.skipped_reason }}</p>
+        {% elif not check.findings %}
+          <p class="hint">Nothing to report.</p>
+        {% else %}
+          {% for finding in check.findings %}
+            <details class="finding sev-{{ finding.severity.label }}">
+              <summary>
+                <span class="pill sev-{{ finding.severity.label }}">{{ finding.severity.label }}</span>
+                {{ finding.title }}
+                <code>{{ finding.code }}</code>
+              </summary>
+              {% if finding.detail %}<p>{{ finding.detail }}</p>{% endif %}
+              {% if finding.remediation %}<p><strong>Fix:</strong> {{ finding.remediation }}</p>{% endif %}
+              {% if finding.reference %}<p class="hint">Reference: {{ finding.reference }}</p>{% endif %}
+            </details>
+          {% endfor %}
+        {% endif %}
+      </section>
+    {% endfor %}
+  </section>
+{% endif %}
+{% endblock %}

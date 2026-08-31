@@ -220,7 +220,16 @@ informational because Gmail does not require it.
 python3 -m unittest discover -s tests -t tests
 ```
 
-226 tests, no test dependencies, runs in well under a second.
+226 tests for InboxReady, no test dependencies, runs in well under a second.
+
+The repository as a whole has 579 tests, covering the review detector and the
+optional web UI too. Those are written as plain pytest functions, which
+`unittest` does not collect, so run the full suite with:
+
+```bash
+pip install -r requirements.txt
+python3 -m pytest tests/ -q
+```
 
 ```
 src/inboxready/
@@ -518,3 +527,105 @@ is why none are vendored here.
 - `tests/` — unit tests, including `test_production_hardening.py`, which pins
   each measured gap above as a regression test
 - `RESEARCH.md` — the research behind the problem this project showcases
+
+---
+
+## Web UI (optional)
+
+Both tools also run behind a small web front end that wraps the same library
+calls the command line uses — `inboxready.audit()` and
+`moderate_batch()`. It adds no detection logic of its own, so what the browser
+shows is exactly what the CLI would print.
+
+Flask is an **optional extra**, never a runtime dependency. Both packages still
+import with no third-party code installed, and CI asserts it.
+
+```bash
+pip install '.[web]'
+python3 -m webui
+# then open http://127.0.0.1:8000
+```
+
+From a checkout without installing:
+
+```bash
+PYTHONPATH=src python3 -m webui
+```
+
+Three pages: an InboxReady audit form, a review-batch scorer, and a moderation
+queue where you claim an item, mark it upheld or overturned, and watch the
+overturn rate — the number that says whether the scores are worth trusting.
+
+### Settings
+
+All are environment variables. The defaults are the safe ones.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `SECRET_KEY` | random per start | Signs the session cookie. Unset means logins and CSRF tokens do not survive a restart. |
+| `LIVE_DNS` | `0` | Allow audits of real domains. Off by default. |
+| `STORAGE` | `memory` | `memory` or `file`. See below — this one matters. |
+| `DATA_DIR` | — | Required when `STORAGE=file`. Where the queue and audit log live. |
+| `DEMO_DIR` | `examples/` if present | Bundled fixtures and example messages. |
+| `MAX_UPLOAD_BYTES` | `262144` | Cap on an uploaded `.eml` or review batch. |
+| `MAX_REVIEWS` | `200` | Reviews accepted per batch. |
+| `DNS_QUERY_BUDGET` | `120` | Queries one audit may issue before it is abandoned. |
+| `DNS_TIMEOUT` | `3.0` | Seconds per DNS query. Lower than the CLI's, because a browser is waiting. |
+| `AUDIT_DEADLINE` | `25.0` | Seconds one audit may take. |
+| `RATE_LIMIT_PER_MINUTE` | `6` | Live-DNS audits per client per minute. |
+| `RATE_LIMIT_BURST` | `3` | How many of those may arrive at once. |
+| `TRUSTED_PROXY_HOPS` | `0` | Reverse proxies in front of the app. Leave at 0 unless there really are some. |
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | Where `python3 -m webui` listens. |
+
+### Deploying it: read this part
+
+The interesting constraints are not hypothetical.
+
+**Persistence is the one that will bite you.** The queue and the audit log are
+single-writer files. The audit log is a hash chain with an anchor, which is
+what makes tampering detectable — and that guarantee is only real if the file
+survives. So:
+
+- `STORAGE=memory` (the default) writes nothing. The queue is lost on restart
+  and no audit log is kept. Safe to run anywhere, including serverless. The UI
+  says so on the queue page rather than letting you assume otherwise.
+- `STORAGE=file` needs a persistent volume **and exactly one instance**. Two
+  instances will corrupt each other's queue. The app refuses to start with
+  `STORAGE=file` and no `DATA_DIR`, because silently choosing a temporary
+  directory would turn the integrity guarantee into a fiction.
+
+Deploying the file-backed version to Cloud Run, Vercel, or anything else with
+an ephemeral filesystem or more than one instance would make the tamper
+detection meaningless. Use the CLI for a record you actually need to keep.
+
+**Live DNS is a free scanning service** for anyone who finds the URL. It is off
+unless you set `LIVE_DNS=1`. When on, each client gets a token bucket and each
+audit gets a hard query budget and a wall-clock deadline, and the audit runs on
+a worker thread so one slow domain does not block everyone else. The rate
+limiter is per process, so N instances permit N times the rate; anything
+serious wants a shared store. The tool makes no outbound HTTP requests at all
+and validates hostnames before they reach a subprocess, so it is not an SSRF
+vector.
+
+**Uploads may be someone's real mail.** They are size-capped before the body is
+read, processed in memory, never written to disk, and never logged.
+
+**There is no authentication.** Anyone who can reach the app can work the
+queue. Fine for a local demo; put an identity proxy in front of anything else.
+
+### Where to run it
+
+| Option | Storage | Notes |
+| --- | --- | --- |
+| Locally | either | `python3 -m webui`. What the commands above do. |
+| One always-on instance (Render, Railway, Fly.io) with a volume | `file` | Simplest way to keep the queue. One instance sidesteps the concurrency problem entirely. |
+| Cloud Run | `memory` only | Scales to zero, costs nothing idle, but the filesystem is ephemeral and it runs many instances. |
+| A static page of pre-generated fixture output | none | Zero cost, zero attack surface, if the point is only to show the work. |
+
+For anything other than local use, run it behind a real server rather than
+Werkzeug's, with a single worker if `STORAGE=file`:
+
+```bash
+pip install gunicorn
+gunicorn --workers 1 --threads 8 'webui:create_app()'
+```

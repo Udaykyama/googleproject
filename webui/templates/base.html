@@ -1,0 +1,55 @@
+{#- Shared shell. No inline script or style: the CSP forbids both. -#}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>{% block title %}Trust &amp; Safety showcases{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="site">
+  <a class="brand" href="{{ url_for('ui.index') }}">Trust &amp; Safety showcases</a>
+  <nav>
+    <a href="{{ url_for('ui.inbox') }}">InboxReady</a>
+    <a href="{{ url_for('ui.reviews') }}">Review moderation</a>
+    <a href="{{ url_for('ui.review_queue') }}">Queue</a>
+  </nav>
+</header>
+
+<div class="banner" role="status">
+  <strong>{{ 'Live DNS' if app_config.live_dns else 'Demo mode' }}.</strong>
+  {% if app_config.live_dns %}
+    This instance resolves real domains, rate limited to
+    {{ app_config.rate_limit_per_minute }} audits per minute per client with a
+    {{ app_config.dns_query_budget }}-query ceiling per audit.
+  {% else %}
+    DNS lookups are disabled; audits run against the bundled fixtures only.
+  {% endif %}
+  {{ app_config.storage_summary }}
+</div>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    <ul class="flashes">
+      {% for category, message in messages %}
+        <li class="flash flash-{{ category }}">{{ message }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+{% endwith %}
+
+<main>
+{% block content %}{% endblock %}
+</main>
+
+<footer>
+  <p>
+    Heuristics and compliance checks, not verdicts. Both tools are documented in
+    the repository's <code>README.md</code>; the command-line versions have none
+    of the limits this hosted one imposes.
+  </p>
+</footer>
+</body>
+</html>
