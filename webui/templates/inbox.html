@@ -13,7 +13,7 @@
 {% endif %}
 
 <form method="post" enctype="multipart/form-data" class="stack">
-  <input type="hidden" name="{{ 'csrf_token' }}" value="{{ csrf_token() }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
   <fieldset>
     <legend>DNS source</legend>
@@ -27,6 +27,13 @@
         {% endif %}
       </label>
     {% endfor %}
+    {% if not fixtures %}
+      <p class="hint">
+        No demo fixtures are installed, so only a message-only audit is
+        available. Run the app from a repository checkout, or point
+        <code>DEMO_DIR</code> at the <code>examples</code> directory.
+      </p>
+    {% endif %}
     {% if not app_config.live_dns %}
       <p class="hint">
         Live DNS is disabled here. Set <code>LIVE_DNS=1</code> when running the
