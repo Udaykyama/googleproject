@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "inboxready"
 version = "1.0.0"
-description = "Audit a sending domain and message against Google's Gmail bulk sender requirements"
+description = "Gmail bulk-sender auditing and fake-review moderation, with an optional web UI"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -24,12 +24,32 @@ dependencies = []
 [project.optional-dependencies]
 # Optional: a native resolver. Without it InboxReady falls back to `dig`.
 dns = ["dnspython>=2.4"]
+# Optional: the web UI. Deliberately an extra and never a core dependency —
+# `inboxready` and `fake_review_detector` must stay importable with no
+# third-party packages installed, which .github/workflows/tests.yml asserts.
+# 3.1.3 is the first release fixing GHSA-68rp-wp8r-4726.
+web = ["flask>=3.1.3"]
 
 [project.scripts]
 inboxready = "inboxready.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+# Two source roots: InboxReady uses a src layout, the detector and the web UI
+# sit at the repository root so `python -m fake_review_detector.cli` keeps
+# working from a checkout. Listed explicitly because automatic discovery
+# cannot span both roots.
+[tool.setuptools]
+packages = [
+    "inboxready",
+    "inboxready.checks",
+    "fake_review_detector",
+    "webui",
+]
 
 [tool.setuptools.package-dir]
-"" = "src"
+"inboxready" = "src/inboxready"
+"inboxready.checks" = "src/inboxready/checks"
+"fake_review_detector" = "fake_review_detector"
+"webui" = "webui"
+
+[tool.setuptools.package-data]
+webui = ["templates/*.html", "static/*.css"]

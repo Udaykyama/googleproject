@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Trust &amp; Safety showcases{% endblock %}
+
+{% block content %}
+<h1>Two tools for problems Google is actively fixing</h1>
+
+<div class="cards">
+  <section class="card">
+    <h2><a href="{{ url_for('ui.inbox') }}">InboxReady</a></h2>
+    <p>
+      Since November 2025 Gmail rejects mail from bulk senders that fail its
+      authentication requirements — at the SMTP layer, so the message never
+      reaches the mailbox. InboxReady checks SPF, DKIM, DMARC, reverse DNS,
+      transport security and one-click unsubscribe, and reports what Gmail
+      would do about each.
+    </p>
+    <p>
+      Every finding carries a severity, the reason, a concrete fix, and the
+      standard it derives from.
+    </p>
+    <p><a class="button" href="{{ url_for('ui.inbox') }}">Audit a sender</a></p>
+  </section>
+
+  <section class="card">
+    <h2><a href="{{ url_for('ui.reviews') }}">Review moderation</a></h2>
+    <p>
+      Google reported removing over 240 million fake or policy-violating
+      reviews in 2024. This scores a batch for the signals that betray a review
+      farm — templated phrasing, near-duplicate text, rating extremes, brand-new
+      accounts, same-day bursts — and routes anything uncertain to a human
+      rather than deleting it.
+    </p>
+    <p>
+      Nothing here proves a review is fake. The output is a work queue.
+    </p>
+    <p><a class="button" href="{{ url_for('ui.reviews') }}">Score a batch</a></p>
+  </section>
+</div>
+
+<section class="card wide">
+  <h2>What this hosted version is not</h2>
+  <ul>
+    <li>
+      <strong>Not the whole tool.</strong> The browser version caps batch size,
+      audit duration and DNS queries. The command-line versions do not.
+    </li>
+    <li>
+      <strong>Not authenticated.</strong> Anyone who can reach this page can
+      work the moderation queue. Put an identity proxy in front of it before
+      exposing it to anyone.
+    </li>
+    <li>
+      <strong>Not necessarily durable.</strong> {{ app_config.storage_summary }}
+    </li>
+  </ul>
+</section>
+{% endblock %}

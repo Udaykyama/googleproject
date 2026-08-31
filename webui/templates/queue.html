@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Human review queue{% endblock %}
+
+{% block content %}
+<h1>Human review queue</h1>
+<p class="lede">
+  Everything the engine was not confident enough to allow outright. An
+  <em>overturned</em> verdict is a measured false positive — the only honest
+  source of production precision.
+</p>
+
+<section class="result">
+  <p class="counts">
+    <span class="pill">{{ stats.total }} total</span>
+    <span class="pill">{{ stats.states.pending }} pending</span>
+    <span class="pill">{{ stats.states.claimed }} claimed</span>
+    <span class="pill">{{ stats.states.resolved }} resolved</span>
+    {% if stats.overturn_rate is not none %}
+      <span class="pill sev-warning">overturn rate {{ '%.1f' % (stats.overturn_rate * 100) }}%</span>
+    {% else %}
+      <span class="pill">overturn rate: not enough verdicts yet</span>
+    {% endif %}
+  </p>
+  {% if integrity %}
+    <p class="hint">Audit log: {{ integrity }}</p>
+  {% else %}
+    <p class="hint">
+      No audit log in this mode. Decisions made here leave no durable record —
+      run the CLI with <code>--audit-log</code> for one that can be verified and
+      replayed.
+    </p>
+  {% endif %}
+</section>
+
+<form method="post" action="{{ url_for('ui.queue_claim') }}" class="inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label>Moderator <input type="text" name="moderator" maxlength="64" required autocomplete="off"></label>
+  <label>Claim <input type="number" name="limit" value="1" min="1" max="25"></label>
+  <button type="submit" class="button">Claim items</button>
+</form>
+
+{% if not items %}
+  <p class="hint">
+    The queue is empty. Score a batch on the
+    <a href="{{ url_for('ui.reviews') }}">review moderation</a> page with
+    "send anything needing human review to the queue" ticked.
+  </p>
+{% else %}
+  {% for item in items %}
+    <section class="check queue-item">
+      <h3>
+        <code>{{ item.review_id }}</code>
+        <span class="pill">score {{ item.decision.score }}</span>
+        <span class="pill risk-{{ item.decision.risk_level.value }}">{{ item.decision.risk_level.value }}</span>
+        <span class="pill state-{{ item.state.value }}">{{ item.state.value }}</span>
+        {% if item.outcome %}
+          <span class="pill outcome-{{ item.outcome.value }}">{{ item.outcome.value }}</span>
+        {% endif %}
+      </h3>
+
+      <p class="hint">
+        Queued {{ item.queued_at }}.
+        {% if item.claimed_by %}Claimed by {{ item.claimed_by }} at {{ item.claimed_at }}.{% endif %}
+        {% if item.resolved_by %}Resolved by {{ item.resolved_by }} at {{ item.resolved_at }}.{% endif %}
+      </p>
+      {% if item.note %}<p><strong>Note:</strong> {{ item.note }}</p>{% endif %}
+
+      <details>
+        <summary>{{ item.decision.signals | length }} signal(s)</summary>
+        <ul class="signals">
+          {% for signal in item.decision.signals %}
+            <li><code>{{ signal.code }}</code> (+{{ signal.weight }}) — {{ signal.message }}</li>
+          {% endfor %}
+        </ul>
+        <p class="hint">
+          Policy {{ item.decision.policy_version }}
+          ({{ item.decision.policy_digest[:12] }}), content
+          {{ item.decision.content_digest[:12] }}.
+        </p>
+      </details>
+
+      {% if item.state.value != 'resolved' %}
+        <form method="post" action="{{ url_for('ui.queue_resolve') }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="review_id" value="{{ item.review_id }}">
+          <label>Moderator <input type="text" name="moderator" maxlength="64" required autocomplete="off"></label>
+          <label>
+            Verdict
+            <select name="outcome">
+              <option value="upheld">upheld — it does violate policy</option>
+              <option value="overturned">overturned — false positive</option>
+              <option value="unclear">unclear — not enough evidence</option>
+            </select>
+          </label>
+          <label>Note <input type="text" name="note" maxlength="500" autocomplete="off"></label>
+          <button type="submit" class="button">Record verdict</button>
+        </form>
+      {% endif %}
+    </section>
+  {% endfor %}
+{% endif %}
+{% endblock %}

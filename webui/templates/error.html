@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ code }} {{ name }}{% endblock %}
+
+{% block content %}
+<h1>{{ code }} — {{ name }}</h1>
+<p>{{ description }}</p>
+<p><a class="button" href="{{ url_for('ui.index') }}">Back to the start</a></p>
+{% endblock %}
