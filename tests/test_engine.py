@@ -219,3 +219,32 @@ def test_batch_is_deterministic():
         for decision in decisions:
             decision.pop("decided_at")
     assert first == second
+
+
+def test_policy_digest_is_computed_once_per_batch(monkeypatch):
+    original = Policy.digest
+    calls = []
+
+    def counted(self):
+        calls.append(self)
+        return original(self)
+
+    monkeypatch.setattr(Policy, "digest", counted)
+    result = moderate_batch([payload(review_id=f"r{i}") for i in range(20)])
+    assert len(calls) == 1
+    assert all(d.policy_digest == result.policy_digest for d in result.decisions)
+
+
+def test_json_reports_capped_duplicate_evidence():
+    result = moderate_batch([payload(review_id=f"r{i}") for i in range(40)])
+    duplicates = result.to_dict()["duplicates"]
+    assert duplicates["truncated"]
+    assert duplicates["compared_pairs"] <= duplicates["candidate_pairs"]
+
+
+def test_bursts_group_timestamps_by_calendar_day():
+    result = moderate_batch([
+        payload(review_id=f"r{i}", author="prolific", date=f"2024-05-01T0{i}:00:00Z")
+        for i in range(3)
+    ])
+    assert all("AUTHOR_BURST" in decision.codes for decision in result.decisions)

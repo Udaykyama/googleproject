@@ -17,6 +17,8 @@ __all__ = [
     "ValidationError",
     "PolicyError",
     "AuditLogError",
+    "StorageError",
+    "StorageBusyError",
 ]
 
 
@@ -51,3 +53,11 @@ class PolicyError(ModerationError):
 
 class AuditLogError(ModerationError):
     """The audit log could not be written or replayed."""
+
+
+class StorageError(ModerationError):
+    """Persistent storage is unavailable or has an unsupported schema."""
+
+
+class StorageBusyError(StorageError):
+    """A concurrent writer did not release storage before the lock timeout."""

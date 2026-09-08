@@ -176,3 +176,23 @@ def test_bundled_dataset_contains_hard_negatives():
     metrics = evaluate(labelled)
     assert metrics.false_positives > 0, "dataset is too easy to be informative"
     assert metrics.precision < 1.0
+
+
+@pytest.mark.parametrize("extra", [{}, {"rating": 99}])
+def test_rejected_duplicate_cannot_relabel_an_accepted_review(extra):
+    labelled, errors = load_labelled([
+        payload(review_id="same", is_fake=False),
+        payload(review_id=" same ", is_fake=True, **extra),
+    ])
+    assert errors
+    assert len(labelled) == 1
+    assert labelled[0].is_fake is False
+
+
+def test_an_invalid_first_row_cannot_supply_the_label_for_a_later_valid_row():
+    labelled, errors = load_labelled([
+        payload(review_id="same", rating=99, is_fake=False),
+        payload(review_id="same", is_fake=True),
+    ])
+    assert len(errors) == 1
+    assert labelled[0].is_fake is True

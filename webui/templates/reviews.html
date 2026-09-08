@@ -88,6 +88,7 @@
       </section>
     {% endif %}
 
+    <div class="table-scroll" role="region" aria-label="Moderation decisions" tabindex="0">
     <table class="decisions">
       <thead>
         <tr><th>Review</th><th>Score</th><th>Risk</th><th>Action</th><th>Signals</th></tr>
@@ -123,6 +124,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
 
     <p class="hint">
       A high score is a reason to look, not a finding of fact. In the bundled

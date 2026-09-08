@@ -69,6 +69,8 @@ class BatchResult:
                 "mode": report.mode if report else "exact",
                 "pairs": len(report.pairs) if report else 0,
                 "candidate_pairs": report.candidate_pairs if report else 0,
+                "compared_pairs": report.compared_pairs if report else 0,
+                "truncated": report.truncated if report else False,
             },
             "decisions": [d.to_dict() for d in self.decisions],
             "errors": [
@@ -130,12 +132,13 @@ def _batch_signals(
         counts: dict[tuple[str, str], int] = {}
         for review in reviews:
             if review.date:
-                key = (review.author, review.date)
+                key = (review.author, review.date[:10])
                 counts[key] = counts.get(key, 0) + 1
         for review in reviews:
             if not review.date:
                 continue
-            observed = counts.get((review.author, review.date), 0)
+            day = review.date[:10]
+            observed = counts.get((review.author, day), 0)
             if observed >= policy.burst_review_count:
                 hits[review.review_id].append(
                     SignalHit(
@@ -143,11 +146,11 @@ def _batch_signals(
                         weight=burst_weight,
                         message=(
                             "review burst: author posted "
-                            f"{observed} reviews on {review.date}"
+                            f"{observed} reviews on {day}"
                         ),
                         evidence={
                             "author": review.author,
-                            "date": review.date,
+                            "date": day,
                             "count": observed,
                         },
                     )
@@ -187,7 +190,9 @@ def score_batch(
     return scores, report
 
 
-def _decide(review: Review, score: ReviewScore, policy: Policy) -> ModerationDecision:
+def _decide(
+    review: Review, score: ReviewScore, policy: Policy, policy_digest: str
+) -> ModerationDecision:
     action = policy.action_for(score.risk_level, score.score)
     return ModerationDecision(
         review_id=review.review_id,
@@ -196,7 +201,7 @@ def _decide(review: Review, score: ReviewScore, policy: Policy) -> ModerationDec
         score=score.score,
         signals=list(score.signals),
         policy_version=policy.version,
-        policy_digest=policy.digest(),
+        policy_digest=policy_digest,
         content_digest=review.content_digest(),
     )
 
@@ -213,7 +218,7 @@ def moderate(
     policy = policy or Policy()
     validated = validate_review(review)
     scores, _ = score_batch([validated], policy)
-    return _decide(validated, scores[0], policy)
+    return _decide(validated, scores[0], policy, policy.digest())
 
 
 def moderate_batch(
@@ -234,7 +239,8 @@ def moderate_batch(
     by_id = {r.review_id: r for r in reviews}
 
     scores.sort(key=lambda s: (-s.score, s.review_id))
-    decisions = [_decide(by_id[s.review_id], s, policy) for s in scores]
+    policy_digest = policy.digest()
+    decisions = [_decide(by_id[s.review_id], s, policy, policy_digest) for s in scores]
 
     return BatchResult(
         decisions=decisions,
@@ -242,5 +248,5 @@ def moderate_batch(
         errors=errors,
         duplicate_report=report,
         policy_version=policy.version,
-        policy_digest=policy.digest(),
+        policy_digest=policy_digest,
     )

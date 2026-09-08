@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -82,6 +83,10 @@ class Policy:
     def __post_init__(self) -> None:
         # Merge over the defaults so a caller can override a single weight
         # without restating the whole table; unknown codes are still rejected.
+        if not isinstance(self.weights, Mapping) or not isinstance(self.actions, Mapping):
+            raise PolicyError("weights and actions must be objects")
+        if not all(isinstance(key, str) for key in (*self.weights, *self.actions)):
+            raise PolicyError("weight and action keys must be strings")
         merged = {**_DEFAULT_WEIGHTS, **dict(self.weights)}
         object.__setattr__(self, "weights", merged)
         self._validate()
@@ -89,8 +94,10 @@ class Policy:
         object.__setattr__(self, "actions", MappingProxyType(dict(self.actions)))
 
     def _validate(self) -> None:
-        if not self.version or not isinstance(self.version, str):
+        if not isinstance(self.version, str) or not self.version.strip():
             raise PolicyError("policy version must be a non-empty string")
+        if not isinstance(self.allow_auto_removal, bool):
+            raise PolicyError("allow_auto_removal must be a boolean")
 
         unknown = set(self.weights) - set(SIGNAL_CODES)
         if unknown:
@@ -127,6 +134,8 @@ class Policy:
                 f"got {sorted(self.actions)}"
             )
         for level, action in self.actions.items():
+            if not isinstance(action, str):
+                raise PolicyError(f"action for {level!r} must be a string")
             try:
                 resolved = Action(action)
             except ValueError as exc:
@@ -139,7 +148,12 @@ class Policy:
                     "allow_auto_removal=true"
                 )
 
-        if not 0.0 < self.duplicate_similarity_threshold <= 1.0:
+        if (
+            isinstance(self.duplicate_similarity_threshold, bool)
+            or not isinstance(self.duplicate_similarity_threshold, (int, float))
+            or not math.isfinite(self.duplicate_similarity_threshold)
+            or not 0.0 < self.duplicate_similarity_threshold <= 1.0
+        ):
             raise PolicyError(
                 "duplicate_similarity_threshold must be within (0, 1], got "
                 f"{self.duplicate_similarity_threshold}"
@@ -222,10 +236,10 @@ class Policy:
     def from_file(cls, path: str | Path) -> "Policy":
         try:
             raw = Path(path).read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise PolicyError(f"cannot read policy file {path}: {exc}") from exc
         try:
             payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (ValueError, RecursionError) as exc:
             raise PolicyError(f"policy file {path} is not valid JSON: {exc}") from exc
         return cls.from_dict(payload)

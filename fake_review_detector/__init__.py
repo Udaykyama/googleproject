@@ -19,7 +19,10 @@ the original scoring-only API.
 from .audit import AuditLog, replay
 from .detector import score_review, score_reviews
 from .engine import BatchResult, moderate, moderate_batch, score_batch
-from .errors import AuditLogError, ModerationError, PolicyError, ValidationError
+from .errors import (
+    AuditLogError, ModerationError, PolicyError, StorageBusyError, StorageError,
+    ValidationError,
+)
 from .evaluation import Metrics, evaluate, threshold_sweep
 from .models import (
     RISK_HIGH,
@@ -33,7 +36,8 @@ from .models import (
     SignalHit,
 )
 from .policy import Policy
-from .queue import Outcome, QueueItem, QueueState, ReviewQueue
+from .queue import Outcome, QueueItem, QueueSnapshot, QueueState, ReviewQueue
+from .sqlite_store import SQLiteStore
 from .validation import validate_batch, validate_review
 
 __all__ = [
@@ -58,7 +62,9 @@ __all__ = [
     # Operations
     "ReviewQueue",
     "QueueItem",
+    "QueueSnapshot",
     "QueueState",
+    "SQLiteStore",
     "Outcome",
     "AuditLog",
     "replay",
@@ -71,6 +77,8 @@ __all__ = [
     "ValidationError",
     "PolicyError",
     "AuditLogError",
+    "StorageError",
+    "StorageBusyError",
     # Original API
     "score_review",
     "score_reviews",

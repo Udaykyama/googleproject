@@ -20,7 +20,7 @@ from .engine import score_batch
 from .errors import ValidationError
 from .models import Review
 from .policy import Policy
-from .validation import validate_batch
+from .validation import iter_validated_reviews
 
 __all__ = ["Metrics", "LabelledReview", "evaluate", "threshold_sweep", "load_labelled"]
 
@@ -141,24 +141,13 @@ def load_labelled(
         payloads.append(payload)
         labels.append(label)
 
-    reviews, validation_errors = validate_batch(payloads)
-    errors.extend(validation_errors)
-
-    # validate_batch drops invalid rows, so re-pair by id rather than position.
-    label_by_id: dict[str, bool] = {}
-    for payload, label in zip(payloads, labels):
-        review_id = str(payload.get("review_id", "")).strip()
-        if review_id:
-            label_by_id[review_id] = label
-
-    return (
-        [
-            LabelledReview(review=review, is_fake=label_by_id[review.review_id])
-            for review in reviews
-            if review.review_id in label_by_id
-        ],
-        errors,
-    )
+    labelled: list[LabelledReview] = []
+    for result, label in zip(iter_validated_reviews(payloads), labels):
+        if isinstance(result, ValidationError):
+            errors.append(result)
+        else:
+            labelled.append(LabelledReview(review=result, is_fake=label))
+    return labelled, errors
 
 
 def evaluate(

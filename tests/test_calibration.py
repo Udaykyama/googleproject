@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -330,3 +331,43 @@ def test_calibration_is_deterministic():
     first = calibrate(_labelled(), Policy()).to_dict()
     second = calibrate(_labelled(), Policy()).to_dict()
     assert first == second
+
+
+def test_a_significantly_worse_candidate_is_never_recommended():
+    result = replace(
+        calibrate(_labelled()), threshold=70, incumbent=30, warnings=(),
+        inconclusive=False, precision=Interval(0.5, 0.45, 0.55),
+        incumbent_precision=Interval(0.9, 0.85, 0.95),
+    )
+    assert not result.recommended
+    assert "keep the current threshold" in result.format_report()
+    assert "less precise" in result.format_report()
+
+
+def test_batch_signals_cannot_leak_across_calibration_halves(monkeypatch):
+    import fake_review_detector.calibration as module
+
+    original = module.score_batch
+    groups = []
+
+    def capture(reviews, policy):
+        groups.append({review.author for review in reviews})
+        return original(reviews, policy)
+
+    monkeypatch.setattr(module, "score_batch", capture)
+    calibrate(_labelled())
+    assert len(groups) == 2
+    assert groups[0].isdisjoint(groups[1])
+
+
+def test_held_out_recall_must_meet_the_requested_floor():
+    from fake_review_detector.evaluation import Metrics
+
+    result = replace(
+        calibrate(_labelled()), threshold=70, incumbent=30, warnings=(),
+        inconclusive=False, precision=Interval(1.0, 0.95, 1.0),
+        incumbent_precision=Interval(0.8, 0.7, 0.9),
+        test=Metrics(80, 0, 100, 20, 70), recall_floor=0.9,
+    )
+    assert not result.recommended
+    assert "below the requested floor" in result.format_report()

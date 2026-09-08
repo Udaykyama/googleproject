@@ -58,10 +58,14 @@ InboxReady reports facts with citations, never a vague grade.
 
 ## Install
 
-Requires Python 3.10+. There are no required dependencies.
+Requires Python 3.10+. There are no required runtime dependencies for the CLIs.
+Use a virtual environment rather than the OS-managed Python installation
+(macOS may still provide Python 3.9).
 
 ```bash
-pip install .
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
 ```
 
 Or run it straight from a checkout without installing:
@@ -216,19 +220,14 @@ informational because Gmail does not require it.
 
 ## Development
 
-```bash
-python3 -m unittest discover -s tests -t tests
-```
-
-226 tests for InboxReady, no test dependencies, runs in well under a second.
-
-The repository as a whole has 579 tests, covering the review detector and the
-optional web UI too. Those are written as plain pytest functions, which
-`unittest` does not collect, so run the full suite with:
+Use pytest to collect both InboxReady's unittest cases and the detector/web
+tests. The suite includes real multi-process SQLite writers, rollback,
+shared rate limiting, audit cancellation, and offline fixtures; it does not
+need live DNS or external services.
 
 ```bash
-pip install -r requirements.txt
-python3 -m pytest tests/ -q
+python -m pip install -r requirements.txt '.[dns]'
+python -m pytest tests/ -q
 ```
 
 ```
@@ -305,6 +304,7 @@ testable on its own:
 | `dedupe.py` | Near-duplicate detection via MinHash + LSH blocking |
 | `engine.py` | Combine signals into a score, a risk level and an action |
 | `queue.py` | Persistent human-review queue with claim/resolve and overturn stats |
+| `sqlite_store.py` | Multi-worker transactions, indexed queue pages, and atomic queue/audit persistence |
 | `audit.py` | Hash-chained decision log that can be verified and replayed |
 | `evaluation.py` | Precision/recall measurement and threshold sweeps |
 | `calibration.py` | Author-grouped splits, Wilson intervals, prevalence-adjusted precision |
@@ -372,6 +372,25 @@ python3 -m fake_review_detector.cli replay data/sample_reviews.json \
     --audit-log decisions.jsonl
 ```
 
+For multiple workers, use a SQLite database instead of the single-writer JSON
+files. The CLI and web UI can share this database:
+
+```bash
+fake-review-detector score data/sample_reviews.json --database .local-data/moderation.sqlite3
+fake-review-detector queue --database .local-data/moderation.sqlite3 --list --page-size 50
+fake-review-detector queue --database .local-data/moderation.sqlite3 --claim alice --limit 5
+fake-review-detector verify --database .local-data/moderation.sqlite3 --require-anchor
+fake-review-detector replay data/sample_reviews.json --database .local-data/moderation.sqlite3
+```
+
+`--database` replaces `--queue`, `--audit-log`, and file `--anchor` settings.
+Scoring logs **every** decision and enqueues new flagged IDs in one transaction.
+Submitting an ID again does not reset its claim or moderator outcome, but does
+record the new scoring decision in the history. Use `queue --release REVIEW_ID`
+to return a claimed item to the pending pool. Listings default to 50 items;
+`--offset` and `--state pending|claimed|resolved` select another page or state.
+With `score --json`, storage messages go to stderr so stdout remains valid JSON.
+
 Or use it as a library:
 
 ```python
@@ -408,6 +427,13 @@ candidate-generation scheme changes that, so the number of partners recorded
 per review is capped instead: 2 000 near-identical reviews take **2.8 s** and
 still flag 1 999 of them, with `DuplicateReport.truncated` set to say the pair
 list is deliberately incomplete.
+
+Candidate pairs are now streamed rather than held in a giant set, and duplicate
+partners are indexed once instead of rescanning the entire pair list for every
+review. The JSON report includes `candidate_pairs`, `compared_pairs`, and
+`truncated` so bounded evidence is explicit. The scoring rules and pair order
+are unchanged; absence from an approximate or capped report is not proof of
+unique text.
 
 **Evasion.** Nine mutations that defeated the original phrase matching —
 Cyrillic homoglyphs, fullwidth forms, zero-width spaces, stretched characters,
@@ -467,6 +493,12 @@ than by review is deliberate: fake reviews arrive in bursts from one account,
 so a per-review split puts one farm's output on both sides and scores the
 detector on text it has effectively already seen.
 
+Each half is scored independently, so duplicate evidence cannot leak across
+the split. Rejected duplicate IDs cannot overwrite accepted rows' labels.
+A recommendation also requires the candidate's precision interval to be
+above the incumbent's, not merely different; the `precision_at_recall`
+objective must meet its recall floor on held-out data too.
+
 It exits non-zero unless the evidence supports a change, and on the current
 dataset it always will:
 
@@ -502,8 +534,8 @@ is why none are vendored here.
   enabled. The `h02` case above is why.
 - **No identity or graph signals.** Real review-farm detection leans on device,
   payment and network-graph evidence that a text-only tool cannot see.
-- **Single-process queue and log.** Both are file-backed and assume one writer;
-  they demonstrate the mechanism, not a distributed deployment.
+- **JSON queue/log files are single-writer.** SQLite supports concurrent workers
+  on one host, but still serializes writes. It is not a multi-host database.
 - **Duplicate pair lists are capped** in dense clusters, as described above.
 - **The phrase table covers 15 languages, not all of them.** A farm operating
   in an untranslated language still evades the phrase signal, though the
@@ -552,8 +584,10 @@ From a checkout without installing:
 PYTHONPATH=src python3 -m webui
 ```
 
-Three pages: an InboxReady audit form, a review-batch scorer, and a moderation
-queue where you claim an item, mark it upheld or overturned, and watch the
+The installed wheel includes the same demo fixtures, messages, sample reviews,
+templates, and CSS as a checkout. Three pages: an InboxReady audit form, a
+review-batch scorer, and a paginated moderation queue where you claim or release
+an item, mark it upheld or overturned, and watch the
 overturn rate — the number that says whether the scores are worth trusting.
 
 ### Settings
@@ -562,16 +596,19 @@ All are environment variables. The defaults are the safe ones.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `SECRET_KEY` | random per start | Signs the session cookie. Unset means logins and CSRF tokens do not survive a restart. |
+| `SECRET_KEY` | random per start in demo/file modes | Signs the session cookie. Required and shared across workers in SQLite mode. There are no application logins. |
 | `LIVE_DNS` | `0` | Allow audits of real domains. Off by default. |
-| `STORAGE` | `memory` | `memory` or `file`. See below — this one matters. |
-| `DATA_DIR` | — | Required when `STORAGE=file`. Where the queue and audit log live. |
-| `DEMO_DIR` | `examples/` if present | Bundled fixtures and example messages. |
+| `STORAGE` | `memory` | `memory`, `file`, or `sqlite`. See below. |
+| `DATA_DIR` | — | Required for `file` and `sqlite`; use a persistent local directory. |
+| `DEMO_DIR` | checkout examples or packaged demos | Optional override for fixtures and example messages. |
 | `MAX_UPLOAD_BYTES` | `262144` | Cap on an uploaded `.eml` or review batch. |
 | `MAX_REVIEWS` | `200` | Reviews accepted per batch. |
 | `DNS_QUERY_BUDGET` | `120` | Queries one audit may issue before it is abandoned. |
 | `DNS_TIMEOUT` | `3.0` | Seconds per DNS query. Lower than the CLI's, because a browser is waiting. |
 | `AUDIT_DEADLINE` | `25.0` | Seconds one audit may take. |
+| `AUDIT_WORKERS` | `4` | Maximum admitted audits per WSGI process; excess work gets HTTP 503 instead of an unbounded backlog. |
+| `QUEUE_PAGE_SIZE` | `50` | Queue items rendered per page; maximum 200. |
+| `SQLITE_TIMEOUT` | `5.0` | Seconds to wait for another database writer before a retryable storage error. |
 | `RATE_LIMIT_PER_MINUTE` | `6` | Live-DNS audits per client per minute. |
 | `RATE_LIMIT_BURST` | `3` | How many of those may arrive at once. |
 | `TRUSTED_PROXY_HOPS` | `0` | Reverse proxies in front of the app. Leave at 0 unless there really are some. |
@@ -581,51 +618,95 @@ All are environment variables. The defaults are the safe ones.
 
 The interesting constraints are not hypothetical.
 
-**Persistence is the one that will bite you.** The queue and the audit log are
-single-writer files. The audit log is a hash chain with an anchor, which is
-what makes tampering detectable — and that guarantee is only real if the file
-survives. So:
+**Choose persistence explicitly.** Audit history must survive process restarts,
+and concurrent workers must not overwrite each other's queue:
 
 - `STORAGE=memory` (the default) writes nothing. The queue is lost on restart
-  and no audit log is kept. Safe to run anywhere, including serverless. The UI
-  says so on the queue page rather than letting you assume otherwise.
-- `STORAGE=file` needs a persistent volume **and exactly one instance**. Two
-  instances will corrupt each other's queue. The app refuses to start with
-  `STORAGE=file` and no `DATA_DIR`, because silently choosing a temporary
-  directory would turn the integrity guarantee into a fiction.
+  and different workers have different queues. This is a local demonstration,
+  not a shared moderation service.
+- `STORAGE=file` preserves the legacy `queue.json` and anchored
+  `decisions.jsonl` files. It needs a persistent volume and **exactly one
+  writer**, including CLI access. Separate workers or simultaneous CLI/web
+  writes are not safe.
+- `STORAGE=sqlite` writes `DATA_DIR/moderation.sqlite3`. WAL mode, short
+  transactions, indexed queue reads, and atomic claims support multiple
+  processes on **one host**. Queue changes, decision records, and the audit
+  head commit together; failed writes roll back. Every worker needs the same
+  `DATA_DIR` and `SECRET_KEY`.
 
-Deploying the file-backed version to Cloud Run, Vercel, or anything else with
-an ephemeral filesystem or more than one instance would make the tamper
-detection meaningless. Use the CLI for a record you actually need to keep.
+SQLite must live on a persistent **local** filesystem, not NFS or a shared
+network volume. It is not horizontal multi-host scaling, and ephemeral
+serverless disks are not durable storage. For multi-host deployment, use a
+server database and a shared job service instead.
+
+Switching to SQLite does not import or delete existing JSON files. Keep
+`STORAGE=file` for existing queue state until an explicit data migration is
+planned; rescoring the original reviews into SQLite does not migrate human
+claims or outcomes.
+
+The SQLite audit head lives in the same transaction as the records. It detects
+inconsistent edits or truncation, **not** someone rewriting or rolling back
+the entire database and its head together. Keep independently administered
+backups/checkpoints for that threat. Queue pages show counts without scanning
+all historical decisions; use **Check audit integrity** or the CLI `verify`
+command for a full, streaming scan.
 
 **Live DNS is a free scanning service** for anyone who finds the URL. It is off
 unless you set `LIVE_DNS=1`. When on, each client gets a token bucket and each
-audit gets a hard query budget and a wall-clock deadline, and the audit runs on
-a worker thread so one slow domain does not block everyone else. The rate
-limiter is per process, so N instances permit N times the rate; anything
-serious wants a shared store. The tool makes no outbound HTTP requests at all
-and validates hostnames before they reach a subprocess, so it is not an SSRF
-vector.
+audit gets a hard query budget and a wall-clock deadline. Admission to the
+audit pool is bounded: HTTP 503 means it is full, HTTP 504 means the deadline
+expired, and HTTP 429 includes a retry delay for a rate limit. Expired audits
+cancel subsequent DNS work, and each outstanding lookup is timeout-bounded.
+SQLite mode shares rate-limit buckets across workers and restarts; memory/file
+mode limits are per process. The tool makes no outbound HTTP requests.
 
 **Uploads may be someone's real mail.** They are size-capped before the body is
 read, processed in memory, never written to disk, and never logged.
 
 **There is no authentication.** Anyone who can reach the app can work the
-queue. Fine for a local demo; put an identity proxy in front of anything else.
+queue. Moderator names are attribution labels, not authenticated ownership.
+Bind to loopback and put an identity-aware HTTPS proxy in front of any shared
+deployment. Only set `TRUSTED_PROXY_HOPS` to the actual trusted proxy count.
 
 ### Where to run it
 
 | Option | Storage | Notes |
 | --- | --- | --- |
-| Locally | either | `python3 -m webui`. What the commands above do. |
-| One always-on instance (Render, Railway, Fly.io) with a volume | `file` | Simplest way to keep the queue. One instance sidesteps the concurrency problem entirely. |
-| Cloud Run | `memory` only | Scales to zero, costs nothing idle, but the filesystem is ephemeral and it runs many instances. |
+| Locally | any | `python3 -m webui` for development only. |
+| One host with a persistent local volume | `sqlite` | Multiple WSGI workers share durable state and rate limits. |
+| One process with a persistent volume | `file` | Legacy operation; no concurrent CLI writer. |
+| Ephemeral/serverless instances | `memory` only | Demo only: each process has its own disposable queue. |
 | A static page of pre-generated fixture output | none | Zero cost, zero attack surface, if the point is only to show the work. |
 
-For anything other than local use, run it behind a real server rather than
-Werkzeug's, with a single worker if `STORAGE=file`:
+For the supported multi-worker deployment:
 
 ```bash
-pip install gunicorn
-gunicorn --workers 1 --threads 8 'webui:create_app()'
+python -m pip install '.[server,dns]'
+export STORAGE=sqlite
+export DATA_DIR="$PWD/.local-data" # use your mounted persistent directory in production
+export SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+gunicorn --bind 127.0.0.1:8000 --workers 2 --threads 4 --timeout 60 'webui:create_app()'
+```
+
+Generate the key once and save it in your deployment's secret store; do not
+regenerate it on every restart. `/healthz` is process liveness; `/readyz` also
+checks that moderation storage is accessible and returns HTTP 503 if it is not.
+Keep the WSGI timeout above `AUDIT_DEADLINE` and `SQLITE_TIMEOUT`. Gunicorn is
+for Unix-like servers; both CLIs and the development UI remain portable.
+
+Back up a live SQLite database through SQLite's backup API, **not** by copying
+only the `.sqlite3` file while its WAL is active:
+
+```bash
+python - <<'PY'
+import os
+import sqlite3
+from pathlib import Path
+
+source = Path(os.environ["DATA_DIR"]).resolve() / "moderation.sqlite3"
+with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as db:
+    with sqlite3.connect("moderation-backup.sqlite3") as backup:
+        db.backup(backup)
+PY
+fake-review-detector verify --database moderation-backup.sqlite3 --require-anchor
 ```

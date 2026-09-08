@@ -14,7 +14,7 @@ sides of every comparison are normalised identically.
 from __future__ import annotations
 
 from .models import Review, SignalHit
-from .normalize import condensed_key, matching_key, mixed_script_words
+from .normalize import matching_key, mixed_script_words
 from .policy import Policy
 
 __all__ = [
@@ -164,7 +164,7 @@ def matched_phrases(text: str) -> list[str]:
     key = matching_key(text)
     if not key:
         return []
-    condensed = condensed_key(text)
+    condensed = key.replace(" ", "")
     return [
         phrase
         for phrase, phrase_key in _PHRASE_KEYS.items()

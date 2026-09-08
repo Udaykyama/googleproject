@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +40,8 @@ from .config import AppConfig
 __all__ = [
     "AuditRequest",
     "AuditProblem",
+    "AuditBusy",
+    "AuditTimedOut",
     "DemoAssets",
     "AuditService",
     "MODE_FIXTURE",
@@ -66,6 +70,22 @@ _MAX_DAILY_VOLUME = 10_000_000_000
 class AuditProblem(ValueError):
     """A user-facing problem with the submitted form."""
 
+    status_code = 400
+    retry_after: int | None = None
+
+
+class AuditBusy(AuditProblem):
+    status_code = 503
+    retry_after = 1
+
+
+class AuditTimedOut(AuditProblem):
+    status_code = 504
+
+
+class AuditDeadlineExceeded(Exception):
+    """Cooperative cancellation must escape checks that catch DnsError."""
+
 
 class QueryBudgetExceeded(Exception):
     """The audit issued more DNS queries than the deployment permits.
@@ -80,11 +100,30 @@ class QueryBudgetExceeded(Exception):
 class _BudgetedResolver(SystemResolver):
     """A live resolver that refuses to exceed a fixed number of queries."""
 
-    def __init__(self, budget: int, **kwargs) -> None:
+    def __init__(self, budget: int, *, deadline: float | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.budget = budget
+        self.deadline = deadline
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    def _check_deadline(self) -> None:
+        if self._cancelled.is_set():
+            raise AuditDeadlineExceeded()
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise AuditDeadlineExceeded()
+            self.timeout = min(self.timeout, remaining)
+
+    def query(self, name: str, rrtype: str) -> list[str]:
+        self._check_deadline()
+        return super().query(name, rrtype)
 
     def _lookup(self, name: str, rrtype: str) -> list[str]:
+        self._check_deadline()
         # ``Resolver.query`` increments the counter before delegating here, and
         # serves cache hits without delegating, so this counts real queries.
         if self.query_count > self.budget:
@@ -231,12 +270,15 @@ class AuditService:
         self.config = config
         self.assets = assets if assets is not None else DemoAssets.discover(config)
         self._psl = PublicSuffixList()
-        # One shared pool: the deadline is enforced by abandoning the future,
-        # so bounding the workers also bounds how many abandoned audits can be
-        # in flight at once.
+        # ThreadPoolExecutor's submission queue is unbounded. Admission must
+        # cover running work, including timed-out tasks until they really exit.
+        self._slots = threading.BoundedSemaphore(config.audit_workers)
         self._pool = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="inboxready-audit"
+            max_workers=config.audit_workers, thread_name_prefix="inboxready-audit"
         )
+
+    def close(self, *, wait: bool = True) -> None:
+        self._pool.shutdown(wait=wait, cancel_futures=True)
 
     # -- request building -------------------------------------------------
 
@@ -319,35 +361,48 @@ class AuditService:
     def run(self, request: AuditRequest):
         """Run an audit, returning an :class:`~inboxready.models.AuditReport`."""
 
+        if not self._slots.acquire(blocking=False):
+            raise AuditBusy("All audit workers are busy. Please retry shortly.")
+        submitted = False
+        deadline = time.monotonic() + self.config.audit_deadline
         try:
-            resolver = self._resolver(request)
-        except DnsError as exc:
-            raise AuditProblem(
-                f"This deployment cannot resolve DNS right now: {exc}"
-            ) from exc
-        except (OSError, ValueError) as exc:
-            raise AuditProblem(f"Could not load that fixture: {exc}") from exc
-
-        future = self._pool.submit(
-            run_inboxready_audit,
-            resolver=resolver,
-            domain=request.domain,
-            raw_message=request.message,
-            selectors=list(request.selectors),
-            ips=list(request.ips),
-            daily_volume=request.daily_volume,
-            spam_rate=request.spam_rate,
-            bulk=False if request.transactional else None,
-            psl=self._psl,
-        )
+            try:
+                resolver = self._resolver(request)
+            except DnsError as exc:
+                raise AuditProblem(
+                    f"This deployment cannot resolve DNS right now: {exc}"
+                ) from exc
+            except (OSError, ValueError) as exc:
+                raise AuditProblem(f"Could not load that fixture: {exc}") from exc
+            if isinstance(resolver, _BudgetedResolver):
+                resolver.deadline = deadline
+            future = self._pool.submit(
+                run_inboxready_audit,
+                resolver=resolver,
+                domain=request.domain,
+                raw_message=request.message,
+                selectors=list(request.selectors),
+                ips=list(request.ips),
+                daily_volume=request.daily_volume,
+                spam_rate=request.spam_rate,
+                bulk=False if request.transactional else None,
+                psl=self._psl,
+            )
+            submitted = True
+            future.add_done_callback(lambda completed: self._slots.release())
+        finally:
+            if not submitted:
+                self._slots.release()
         try:
-            return future.result(timeout=self.config.audit_deadline)
-        except FutureTimeout:
+            return future.result(timeout=max(0.0, deadline - time.monotonic()))
+        except (FutureTimeout, AuditDeadlineExceeded):
+            if isinstance(resolver, _BudgetedResolver):
+                resolver.cancel()
             future.cancel()
-            raise AuditProblem(
-                f"The audit took longer than {self.config.audit_deadline:g}s and "
-                "was stopped. Slow or unresponsive nameservers are the usual "
-                "cause; the command-line tool has no deadline."
+            raise AuditTimedOut(
+                f"The audit exceeded its {self.config.audit_deadline:g}s deadline; "
+                "no complete report is available. Further DNS queries have been "
+                "cancelled. Retry with a demo fixture or use the command-line tool."
             ) from None
         except QueryBudgetExceeded as exc:
             raise AuditProblem(str(exc)) from exc

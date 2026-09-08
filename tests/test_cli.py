@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fake_review_detector.cli import main  # noqa: E402
@@ -189,3 +191,85 @@ def test_empty_queue_reports_cleanly(tmp_path, capsys):
 def test_no_arguments_prints_help(capsys):
     assert main([]) == 2
     assert "usage" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.parametrize("storage_flag", ["--queue", "--database"])
+def test_score_with_storage_keeps_stdout_valid_json(tmp_path, capsys, storage_flag):
+    path = tmp_path / "store"
+    assert main(["score", str(SAMPLE), storage_flag, str(path), "--json"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["accepted"] == 6
+    assert "added to" in captured.err
+
+
+def test_sqlite_cli_workflow(tmp_path, capsys):
+    path = tmp_path / "moderation.sqlite3"
+    storage = ["--database", str(path)]
+    assert main(["score", str(SAMPLE), *storage]) == 0
+    capsys.readouterr()
+    assert main(["verify", *storage, "--require-anchor"]) == 0
+    assert "anchor matches" in capsys.readouterr().out
+    assert main(["replay", str(SAMPLE), *storage]) == 0
+    assert "matches" in capsys.readouterr().out
+    assert main(["queue", *storage, "--claim", "alice", "--limit", "1", "--json"]) == 0
+    claimed = json.loads(capsys.readouterr().out)[0]
+    review_id = claimed["decision"]["review_id"]
+    assert main(["queue", *storage, "--release", review_id]) == 0
+    assert "released" in capsys.readouterr().out
+    assert main([
+        "queue", *storage, "--resolve", review_id, "--moderator", "alice",
+        "--outcome", "overturned", "--json",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "overturned"
+
+
+def test_storage_failure_does_not_print_a_successful_report(tmp_path, capsys):
+    path = tmp_path / "not-a-database"
+    path.write_text("not sqlite", encoding="utf-8")
+    assert main(["score", str(SAMPLE), "--database", str(path), "--json"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Error:" in captured.err
+
+
+def test_conflicting_storage_flags_are_refused(tmp_path, capsys):
+    assert main([
+        "score", str(SAMPLE), "--database", str(tmp_path / "db"),
+        "--queue", str(tmp_path / "queue.json"),
+    ]) == 1
+    assert "replaces" in capsys.readouterr().err
+    assert not list(tmp_path.iterdir())
+
+
+def test_missing_sqlite_log_is_not_reported_as_verified(tmp_path, capsys):
+    path = tmp_path / "missing"
+    assert main(["verify", "--database", str(path)]) == 1
+    assert not path.exists()
+    assert "Error:" in capsys.readouterr().err
+
+
+def test_queue_listing_is_paginated(tmp_path, capsys):
+    storage = ["--database", str(tmp_path / "db")]
+    main(["score", str(SAMPLE), *storage])
+    capsys.readouterr()
+    assert main(["queue", *storage, "--list", "--page-size", "1"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("score=") == 1
+    assert "--offset 1" in out
+
+
+@pytest.mark.parametrize("args", [
+    ["evaluate", str(LABELLED), "--sweep", "--step", "0"],
+    ["queue", "--claim", "alice", "--limit", "-1"],
+    ["queue", "--list", "--offset", "-1"],
+])
+def test_invalid_numeric_options_are_usage_errors(args):
+    with pytest.raises(SystemExit) as caught:
+        main(args)
+    assert caught.value.code == 2
+
+
+def test_impossible_calibration_is_a_clean_error(tmp_path, capsys):
+    path = write(tmp_path / "labels.json", [{**payload(), "is_fake": True}])
+    assert main(["calibrate", str(path)]) == 1
+    assert "both classes" in capsys.readouterr().err

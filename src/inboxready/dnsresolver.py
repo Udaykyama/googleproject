@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -63,7 +64,7 @@ def is_valid_hostname(name: str) -> bool:
 
     if not name or len(name.rstrip(".")) > 253:
         return False
-    return bool(_HOSTNAME_RE.match(name))
+    return bool(_HOSTNAME_RE.fullmatch(name))
 
 
 def normalize_name(name: str) -> str:
@@ -159,8 +160,18 @@ class StaticResolver(Resolver):
 
     def __init__(self, records: dict[str, dict[str, list[str]]] | None = None) -> None:
         super().__init__()
+        if records is not None and not isinstance(records, dict):
+            raise ValueError("fixture must contain an object of DNS records")
         self.records: dict[str, dict[str, list[str]]] = {}
         for name, rrsets in (records or {}).items():
+            if not isinstance(name, str) or not isinstance(rrsets, dict):
+                raise ValueError("each fixture hostname must map to an object of record types")
+            for rrtype, values in rrsets.items():
+                if (
+                    not isinstance(rrtype, str) or not isinstance(values, list)
+                    or not all(isinstance(value, str) for value in values)
+                ):
+                    raise ValueError("fixture record types must map to arrays of strings")
             self.records[normalize_name(name)] = {
                 rrtype.upper(): list(values) for rrtype, values in rrsets.items()
             }
@@ -170,6 +181,8 @@ class StaticResolver(Resolver):
         """Load a fixture from a JSON file."""
 
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("fixture must contain an object of DNS records")
         zone = payload.get("dns", payload)
         if not isinstance(zone, dict):
             raise ValueError("fixture must contain an object of DNS records")
@@ -188,9 +201,12 @@ class SystemResolver(Resolver):
 
     def __init__(self, timeout: float = 5.0, nameserver: str | None = None) -> None:
         super().__init__()
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("DNS timeout must be finite and greater than zero")
         self.timeout = timeout
-        self.nameserver = nameserver
+        self.nameserver = str(ipaddress.ip_address(nameserver)) if nameserver else None
         self._dns = self._import_dnspython()
+        self._native_resolver = None
         if self._dns is None and shutil.which("dig") is None:
             raise DnsError(
                 "no DNS backend available: install 'dnspython' (pip install dnspython) "
@@ -214,19 +230,23 @@ class SystemResolver(Resolver):
         return self._lookup_dig(name, rrtype)
 
     def _lookup_dnspython(self, name: str, rrtype: str) -> list[str]:  # pragma: no cover
+        from dns.exception import DNSException
+
         dnsresolver = self._dns
-        resolver = dnsresolver.Resolver()
-        resolver.lifetime = self.timeout
-        resolver.timeout = self.timeout
-        if self.nameserver:
-            resolver.nameservers = [self.nameserver]
         try:
-            answer = resolver.resolve(name, rrtype)
+            if self._native_resolver is None:
+                self._native_resolver = dnsresolver.Resolver()
+                if self.nameserver:
+                    self._native_resolver.nameservers = [self.nameserver]
+            resolver = self._native_resolver
+            resolver.lifetime = self.timeout
+            resolver.timeout = self.timeout
+            answer = resolver.resolve(name, rrtype, search=False)
         except dnsresolver.NXDOMAIN as exc:
             raise NXDOMAIN(f"{name} does not exist") from exc
         except dnsresolver.NoAnswer:
             return []
-        except Exception as exc:
+        except DNSException as exc:
             raise DnsError(f"{rrtype} lookup for {name} failed: {exc}") from exc
         return [self._render_rdata(rdata, rrtype) for rdata in answer]
 
@@ -239,14 +259,17 @@ class SystemResolver(Resolver):
                 part.decode("utf-8", "replace") if isinstance(part, bytes) else str(part)
                 for part in rdata.strings
             )
-        return str(rdata).rstrip(".")
+        return _strip_root_dot(str(rdata), rrtype)
 
     def _lookup_dig(self, name: str, rrtype: str) -> list[str]:
         # `name` has already been through normalize_name(), so it matches
         # _HOSTNAME_RE and cannot smuggle in arguments. No shell is used.
         if not is_valid_hostname(name):  # defensive: never reachable via query()
             raise ValueError(f"refusing to resolve invalid name: {name!r}")
-        argv = ["dig", "+time=%d" % max(1, int(self.timeout)), "+tries=1", "+noall", "+answer"]
+        argv = [
+            "dig", "-r", "+time=%d" % max(1, int(self.timeout)),
+            "+tries=1", "+noall", "+comments", "+answer",
+        ]
         if self.nameserver:
             server = str(ipaddress.ip_address(self.nameserver))
             argv.append(f"@{server}")
@@ -256,7 +279,7 @@ class SystemResolver(Resolver):
                 argv,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout + 5,
+                timeout=self.timeout,
                 check=False,
                 shell=False,
             )
@@ -264,6 +287,13 @@ class SystemResolver(Resolver):
             raise DnsError(f"{rrtype} lookup for {name} failed: {exc}") from exc
         if proc.returncode != 0:
             raise DnsError(f"{rrtype} lookup for {name} failed: {proc.stderr.strip()}")
+        status = re.search(r"\bstatus:\s*([A-Z0-9]+)\b", proc.stdout)
+        if status is None:
+            raise DnsError(f"{rrtype} lookup for {name} returned no DNS status")
+        if status[1] == "NXDOMAIN":
+            raise NXDOMAIN(f"{name} does not exist")
+        if status[1] != "NOERROR":
+            raise DnsError(f"{rrtype} lookup for {name} failed: {status[1]}")
         return list(self._parse_dig_answer(proc.stdout, rrtype))
 
     @staticmethod
@@ -276,7 +306,14 @@ class SystemResolver(Resolver):
             if rrtype == "TXT":
                 yield _unquote_txt(rdata)
             else:
-                yield rdata.rstrip(".")
+                yield _strip_root_dot(rdata, rrtype)
+
+
+def _strip_root_dot(rdata: str, rrtype: str) -> str:
+    # The root target in a null MX is data, not hostname punctuation.
+    if rdata == "." or (rrtype == "MX" and rdata.split()[-1:] == ["."]):
+        return rdata
+    return rdata.rstrip(".")
 
 
 def _unquote_txt(rdata: str) -> str:

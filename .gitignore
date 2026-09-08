@@ -5,3 +5,10 @@ build/
 dist/
 .venv/
 .pytest_cache/
+.local-data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+/queue.json
+/decisions.jsonl
+/decisions.jsonl.anchor

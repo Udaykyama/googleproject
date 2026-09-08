@@ -155,3 +155,24 @@ def test_similarity_threshold_bounds():
 
 def test_zero_weight_disables_a_signal():
     assert Policy(weights={"SHOUTY_TEXT": 0}).weight("SHOUTY_TEXT") == 0
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1, 0, None])
+def test_auto_removal_opt_in_must_be_an_actual_boolean(value):
+    with pytest.raises(PolicyError, match="boolean"):
+        Policy(
+            allow_auto_removal=value,
+            actions={"low": "allow", "medium": "enqueue", "high": "remove"},
+        )
+
+
+@pytest.mark.parametrize("settings", [
+    {"weights": None}, {"weights": ["GENERIC_PHRASE"]},
+    {"actions": "allow"}, {"actions": {"low": None}},
+    {"duplicate_similarity_threshold": "0.85"},
+    {"duplicate_similarity_threshold": float("nan")},
+    {"duplicate_similarity_threshold": True},
+])
+def test_bad_configuration_types_raise_policy_errors(settings):
+    with pytest.raises(PolicyError):
+        Policy(**settings)

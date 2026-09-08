@@ -29,9 +29,10 @@
     {% endfor %}
     {% if not fixtures %}
       <p class="hint">
-        No demo fixtures are installed, so only a message-only audit is
-        available. Run the app from a repository checkout, or point
-        <code>DEMO_DIR</code> at the <code>examples</code> directory.
+        No demo fixtures are installed. Upload a message for an offline audit
+        {% if app_config.live_dns %}or choose live DNS{% endif %}.
+        To supply demo fixtures, point <code>DEMO_DIR</code> at the
+        <code>examples</code> directory.
       </p>
     {% endif %}
     {% if not app_config.live_dns %}

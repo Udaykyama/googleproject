@@ -1,6 +1,7 @@
 """Tests for the human review queue."""
 
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -216,3 +217,20 @@ def test_save_creates_missing_directories(tmp_path):
     queue.enqueue(flagged(1))
     queue.save()
     assert (tmp_path / "nested" / "q.json").exists()
+
+
+@pytest.mark.parametrize("payload", [None, [], {"items": {}}, {"items": [None]}, {"version": 99}])
+def test_invalid_queue_shape_is_a_clean_error(tmp_path, payload):
+    path = tmp_path / "queue.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ModerationError):
+        ReviewQueue(path)
+
+
+def test_snapshot_is_detached_from_subsequent_queue_mutations(tmp_path):
+    queue = ReviewQueue(tmp_path / "queue.json")
+    queue.enqueue(flagged())
+    snapshot = queue.snapshot(limit=1)
+    queue.claim("alice")
+    assert snapshot.items[0].state is QueueState.PENDING
+    assert snapshot.stats["states"]["claimed"] == 0

@@ -12,6 +12,8 @@ field and review id so a batch can skip one bad item and keep going.
 from __future__ import annotations
 
 import unicodedata
+from datetime import date, datetime
+from typing import Iterator
 
 from .errors import ValidationError
 from .models import Review
@@ -24,6 +26,7 @@ __all__ = [
     "MAX_ACCOUNT_AGE_DAYS",
     "validate_review",
     "validate_batch",
+    "iter_validated_reviews",
 ]
 
 MAX_TEXT_LENGTH = 20_000
@@ -46,6 +49,7 @@ _REVIEW_FIELDS = {
 
 
 def _require_str(value: object, field: str, review_id: str, max_length: int) -> str:
+    review_id = review_id.encode("utf-8", "backslashreplace").decode("utf-8")
     if value is None:
         raise ValidationError(f"{field} is required", field=field, review_id=review_id)
     if not isinstance(value, str):
@@ -60,6 +64,12 @@ def _require_str(value: object, field: str, review_id: str, max_length: int) -> 
             field=field,
             review_id=review_id,
         )
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        raise ValidationError(
+            f"{field} contains invalid Unicode", field=field, review_id=review_id
+        ) from None
     return value
 
 
@@ -108,11 +118,14 @@ def _validate_date(value: object, review_id: str) -> str | None:
     if value is None:
         return None
     text = _require_str(value, "date", review_id, 64)
-    # Parsed only to reject garbage; the value is stored as given.
-    from datetime import date as _date
-
     try:
-        _date.fromisoformat(text[:10])
+        if len(text) < 10 or text[4] != "-" or text[7] != "-":
+            raise ValueError("expected YYYY-MM-DD")
+        date.fromisoformat(text[:10])
+        if len(text) > 10:
+            if text[10] not in ("T", "t", " "):
+                raise ValueError("invalid date suffix")
+            datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValidationError(
             f"date must be an ISO-8601 date, got {text!r}",
@@ -164,6 +177,8 @@ def validate_review(raw: Review | dict) -> Review:
 
     unknown = set(payload) - _REVIEW_FIELDS
     if unknown:
+        if not all(isinstance(key, str) for key in unknown):
+            raise ValidationError("review field names must be strings", field="review")
         raise ValidationError(
             f"unknown field(s): {', '.join(sorted(unknown))}",
             field=sorted(unknown)[0],
@@ -212,14 +227,13 @@ def validate_review(raw: Review | dict) -> Review:
     )
 
 
-def validate_batch(
+def iter_validated_reviews(
     items: object, *, max_items: int | None = None
-) -> tuple[list[Review], list[ValidationError]]:
-    """Validate many reviews, collecting rather than raising per-item errors.
+) -> Iterator[Review | ValidationError]:
+    """Yield one validated review or error per input, preserving row alignment.
 
-    One malformed submission must not discard an entire batch, so failures are
-    returned alongside the reviews that passed. Duplicate ids are rejected: two
-    decisions under the same id make an audit trail ambiguous.
+    This also lets callers keep labels attached to the exact accepted row,
+    rather than rejoining by an ID that a rejected duplicate may have reused.
     """
 
     if isinstance(items, (str, bytes)) or not hasattr(items, "__iter__"):
@@ -228,33 +242,44 @@ def validate_batch(
             field="batch",
         )
 
-    valid: list[Review] = []
-    errors: list[ValidationError] = []
+    if max_items is not None and (
+        isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 0
+    ):
+        raise ValidationError("max_items must be a non-negative integer", field="batch")
     seen: set[str] = set()
 
     for index, item in enumerate(items):
         if max_items is not None and index >= max_items:
-            errors.append(
-                ValidationError(
-                    f"batch exceeds the {max_items} item limit", field="batch"
-                )
+            yield ValidationError(
+                f"batch exceeds the {max_items} item limit", field="batch"
             )
             break
         try:
             review = validate_review(item)
         except ValidationError as exc:
-            errors.append(exc)
+            yield exc
             continue
         if review.review_id in seen:
-            errors.append(
-                ValidationError(
-                    f"duplicate review_id {review.review_id!r} in batch",
-                    field="review_id",
-                    review_id=review.review_id,
-                )
+            yield ValidationError(
+                f"duplicate review_id {review.review_id!r} in batch",
+                field="review_id",
+                review_id=review.review_id,
             )
             continue
         seen.add(review.review_id)
-        valid.append(review)
+        yield review
 
+
+def validate_batch(
+    items: object, *, max_items: int | None = None
+) -> tuple[list[Review], list[ValidationError]]:
+    """Collect valid reviews and per-item errors without aborting the batch."""
+
+    valid: list[Review] = []
+    errors: list[ValidationError] = []
+    for result in iter_validated_reviews(items, max_items=max_items):
+        if isinstance(result, ValidationError):
+            errors.append(result)
+        else:
+            valid.append(result)
     return valid, errors
