@@ -272,6 +272,7 @@ class CalibrationResult:
     #: incumbent overlap — i.e. the data cannot tell them apart.
     inconclusive: bool
     warnings: tuple[str, ...] = ()
+    recall_floor: float = 0.90
 
     @property
     def recommended(self) -> bool:
@@ -285,14 +286,20 @@ class CalibrationResult:
 
         return (
             not self.inconclusive
+            and self.precision.low > self.incumbent_precision.high
             and not self.warnings
             and self.threshold != self.incumbent
+            and (
+                self.objective != "precision_at_recall"
+                or self.test.recall >= self.recall_floor
+            )
         )
 
     def to_dict(self) -> dict:
         return {
             "threshold": self.threshold,
             "objective": self.objective,
+            "recall_floor": self.recall_floor,
             "incumbent": self.incumbent,
             "recommended": self.recommended,
             "inconclusive": self.inconclusive,
@@ -342,6 +349,11 @@ class CalibrationResult:
         ]
         if self.threshold == self.incumbent:
             lines.append("VERDICT: keep the current threshold; the sweep chose it too.")
+        elif self.precision.high < self.incumbent_precision.low:
+            lines.append(
+                "VERDICT: keep the current threshold; the candidate is less precise "
+                "on held-out data."
+            )
         elif self.warnings and not self.inconclusive:
             lines.append(
                 f"VERDICT: threshold {self.threshold} looks better than "
@@ -354,6 +366,12 @@ class CalibrationResult:
                 "VERDICT: not enough evidence to change the threshold. The "
                 "candidate and incumbent confidence intervals overlap, so this "
                 "data cannot tell them apart."
+            )
+        elif self.objective == "precision_at_recall" and self.test.recall < self.recall_floor:
+            lines.append(
+                "VERDICT: keep the current threshold; held-out recall "
+                f"{self.test.recall:.3f} is below the requested floor "
+                f"{self.recall_floor:.3f}."
             )
         else:
             lines.append(
@@ -434,23 +452,25 @@ def calibrate(
             "reviews from more distinct authors"
         )
 
-    # Score once, then re-threshold. Scoring is the expensive part and the
-    # scores do not depend on the threshold.
-    scores, _ = score_batch([item.review for item in items], policy)
-    score_by_id = {s.review_id: s.score for s in scores}
+    # Batch signals must not cross the split: duplicate text in the training
+    # half is not evidence available to an independent held-out batch.
+    train_scores, _ = score_batch([item.review for item in split.train], policy)
+    test_scores, _ = score_batch([item.review for item in split.test], policy)
+    train_by_id = {s.review_id: s.score for s in train_scores}
+    test_by_id = {s.review_id: s.score for s in test_scores}
 
     score_objective = OBJECTIVES[objective]
     best_threshold = policy.medium_threshold
     best_value = float("-inf")
     for threshold in range(start, stop + 1, step):
-        value = score_objective(_metrics_at(score_by_id, split.train, threshold), recall_floor)
+        value = score_objective(_metrics_at(train_by_id, split.train, threshold), recall_floor)
         # Strict > keeps the lowest threshold among ties, which is the
         # conservative choice: it flags more, and flagging enqueues for review.
         if value > best_value:
             best_value, best_threshold = value, threshold
 
-    test = _metrics_at(score_by_id, split.test, best_threshold)
-    incumbent_test = _metrics_at(score_by_id, split.test, policy.medium_threshold)
+    test = _metrics_at(test_by_id, split.test, best_threshold)
+    incumbent_test = _metrics_at(test_by_id, split.test, policy.medium_threshold)
     precision = _precision_interval(test)
     incumbent_precision = _precision_interval(incumbent_test)
 
@@ -475,7 +495,7 @@ def calibrate(
         threshold=best_threshold,
         objective=objective,
         incumbent=policy.medium_threshold,
-        train=_metrics_at(score_by_id, split.train, best_threshold),
+        train=_metrics_at(train_by_id, split.train, best_threshold),
         test=test,
         incumbent_test=incumbent_test,
         precision=precision,
@@ -487,4 +507,5 @@ def calibrate(
         split_counts=split.counts(),
         inconclusive=precision.overlaps(incumbent_precision),
         warnings=tuple(warnings),
+        recall_floor=recall_floor,
     )

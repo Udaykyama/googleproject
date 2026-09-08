@@ -184,3 +184,26 @@ def test_validation_error_reports_field_and_id():
     assert error.field == "rating"
     assert error.review_id == "r9"
     assert "r9" in str(error) and "rating" in str(error)
+
+
+@pytest.mark.parametrize("field", ["text", "review_id", "author", "date"])
+def test_invalid_unicode_is_an_item_error_not_a_batch_crash(field):
+    reviews, errors = validate_batch([
+        payload(review_id="valid"),
+        payload(**{field: "\ud800"}),
+    ])
+    assert [review.review_id for review in reviews] == ["valid"]
+    assert len(errors) == 1
+    errors[0].review_id.encode("utf-8")
+
+
+def test_bad_date_suffix_is_rejected_but_valid_timestamp_is_preserved():
+    with pytest.raises(ValidationError):
+        validate_review(payload(date="2024-05-01not-a-date"))
+    timestamp = "2024-05-01T12:34:56Z"
+    assert validate_review(payload(date=timestamp)).date == timestamp
+
+
+def test_non_string_field_keys_are_clean_errors():
+    with pytest.raises(ValidationError):
+        validate_review({**payload(), 1: "bad"})

@@ -22,7 +22,7 @@ jobs:
         # The floor is pyproject's requires-python. Both projects are
         # stdlib-only, so a break here is a real incompatibility, not a
         # dependency-resolution artefact.
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +34,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements.txt ".[dns]"
 
       - name: Run the full suite
         # `python -m pytest` rather than bare `pytest`: it puts the repository
@@ -140,14 +140,18 @@ jobs:
         # templates and stylesheet are actually packaged.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[web]"
+          python -m pip install ".[server]"
 
       - name: Boot the app
         run: |
-          python -m webui > /tmp/webui.log 2>&1 &
+          # Run outside the checkout so imports and demo assets must come from
+          # the installed wheel, rather than accidentally passing from source.
+          cd /tmp
+          gunicorn --bind 127.0.0.1:8000 --workers 2 --threads 2 \
+            --timeout 60 'webui:create_app()' > /tmp/webui.log 2>&1 &
           echo $! > /tmp/webui.pid
           for _ in $(seq 1 40); do
-            if curl -fsS http://127.0.0.1:8000/healthz > /dev/null 2>&1; then
+            if curl -fsS http://127.0.0.1:8000/readyz > /dev/null 2>&1; then
               echo "app is up"
               exit 0
             fi
@@ -158,11 +162,12 @@ jobs:
           exit 1
         env:
           SECRET_KEY: ci-smoke-test-not-a-real-secret
-          DEMO_DIR: examples
+          STORAGE: sqlite
+          DATA_DIR: /tmp/webui-data
 
       - name: Every page must render
         run: |
-          for path in / /inbox /reviews /queue /healthz; do
+          for path in / /inbox /reviews /queue /healthz /readyz /static/style.css; do
             code=$(curl -s -o /tmp/body -w '%{http_code}' "http://127.0.0.1:8000$path")
             test "$code" = "200" || {
               echo "::error::$path returned $code"
@@ -194,6 +199,18 @@ jobs:
           grep -q "Score 0/100" /tmp/audit.html
           grep -q "SPF_TOO_MANY_LOOKUPS" /tmp/audit.html
           echo "audit matched the command-line verdict"
+
+      - name: CLI and web workers must share the moderation queue
+        run: |
+          python -m fake_review_detector.cli score data/sample_reviews.json \
+            --database /tmp/webui-data/moderation.sqlite3 --json > /tmp/scored.json
+          python -c "import json; assert json.load(open('/tmp/scored.json'))['accepted'] == 6"
+          curl -fsS http://127.0.0.1:8000/queue > /tmp/queue.html
+          grep -q "r2" /tmp/queue.html
+          python -m fake_review_detector.cli verify \
+            --database /tmp/webui-data/moderation.sqlite3 --require-anchor
+          python -m fake_review_detector.cli replay data/sample_reviews.json \
+            --database /tmp/webui-data/moderation.sqlite3
 
       - name: A forged form must be rejected
         run: |

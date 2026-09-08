@@ -7,13 +7,20 @@ meaning: it must agree with exhaustive comparison on the pairs it reports.
 import random
 import subprocess
 import sys
+from itertools import islice
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fake_review_detector.dedupe import (  # noqa: E402
     find_duplicates,
     minhash_signature,
+    DuplicatePair,
+    DuplicateReport,
+    _exact_candidates,
+    _lsh_candidates,
 )
 from fake_review_detector.models import Review  # noqa: E402
 from fake_review_detector.normalize import matching_key, word_shingles  # noqa: E402
@@ -164,3 +171,43 @@ def test_empty_matching_keys_do_not_all_collide():
     pairs = pair_set(find_duplicates(reviews, exact_max_batch=1))
     assert ("a", "c") in pairs
     assert ("a", "b") not in pairs
+
+
+def test_exact_candidates_are_streamed_without_a_pair_matrix():
+    candidates = _exact_candidates(100_000)
+    assert iter(candidates) is candidates
+    assert list(islice(candidates, 3)) == [(0, 1), (0, 2), (0, 3)]
+
+
+def test_lsh_candidates_are_streamed_in_canonical_order():
+    candidates = _lsh_candidates(["the same battery review"] * 30)
+    assert iter(candidates) is candidates
+    assert list(candidates) == list(_exact_candidates(30))
+
+
+def test_partner_index_is_built_once_and_results_cannot_mutate_it():
+    class CountedPairs(tuple):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    pairs = CountedPairs([
+        DuplicatePair("a", "b", 0.9), DuplicatePair("a", "c", 1.0),
+    ])
+    report = DuplicateReport(pairs, "exact", 3, 3)
+    assert report.partners("a") == [("c", 1.0), ("b", 0.9)]
+    report.partners("a").clear()
+    assert report.ids() == {"a", "b", "c"}
+    assert report.partners("b") == [("a", 0.9)]
+    assert pairs.iterations == 1
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"threshold": float("nan")}, {"threshold": 0},
+    {"max_partners": 0}, {"exact_max_batch": -1},
+])
+def test_invalid_duplicate_limits_are_rejected(kwargs):
+    with pytest.raises(ValueError):
+        find_duplicates([], **kwargs)

@@ -36,10 +36,12 @@ from flask import (
 )
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
+from fake_review_detector.errors import AuditLogError, StorageError
+
 from .audits import MODE_LIVE, AuditProblem, AuditService
 from .config import AppConfig
-from .moderation import BatchProblem, ModerationService
-from .ratelimit import RateLimiter
+from .moderation import BatchProblem, DatabaseStore, ModerationService
+from .ratelimit import RateLimiter, SQLiteRateLimiter
 
 __all__ = ["create_app"]
 
@@ -79,7 +81,9 @@ def _check_csrf() -> None:
         return
     submitted = request.form.get(_CSRF_FIELD, "")
     expected = session.get(_CSRF_SESSION_KEY, "")
-    if not expected or not hmac.compare_digest(submitted, expected):
+    if not expected or not hmac.compare_digest(
+        submitted.encode("utf-8"), expected.encode("utf-8")
+    ):
         abort(400, "This form expired or came from another site. Try again.")
 
 
@@ -113,6 +117,13 @@ def healthz():
     return {"status": "ok"}, 200
 
 
+@bp.route("/readyz")
+def readyz():
+    service: ModerationService = current_app.extensions["ui_moderation_service"]
+    service.healthcheck()
+    return {"status": "ready"}, 200
+
+
 @bp.route("/inbox", methods=["GET", "POST"])
 def inbox():
     service: AuditService = current_app.extensions["ui_audit_service"]
@@ -138,7 +149,8 @@ def inbox():
         report = service.run(audit_request)
     except AuditProblem as exc:
         context["error"] = str(exc)
-        return render_template("inbox.html", **context), 400
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else {}
+        return render_template("inbox.html", **context), exc.status_code, headers
 
     context["report"] = report
     context["request_summary"] = audit_request
@@ -211,13 +223,29 @@ def _reviews_from_request():
 @bp.route("/queue")
 def review_queue():
     service: ModerationService = current_app.extensions["ui_moderation_service"]
-    snapshot = service.snapshot()
+    try:
+        snapshot = service.snapshot(
+            page=request.args.get("page", "1"), state=request.args.get("state", "")
+        )
+    except BatchProblem as exc:
+        abort(400, str(exc))
     return render_template(
         "queue.html",
         items=snapshot.items,
         stats=snapshot.stats,
+        snapshot=snapshot,
+        page=snapshot.offset // snapshot.limit + 1,
+        selected_state=snapshot.state.value if snapshot.state else "",
         integrity=service.integrity(),
     )
+
+
+def _queue_redirect():
+    return redirect(url_for(
+        "ui.review_queue",
+        page=request.form.get("page", "1"),
+        state=request.form.get("state", ""),
+    ))
 
 
 @bp.route("/queue/claim", methods=["POST"])
@@ -234,7 +262,7 @@ def queue_claim():
             f"Claimed {claimed} item(s)." if claimed else "Nothing left to claim.",
             "notice" if claimed else "warning",
         )
-    return redirect(url_for("ui.review_queue"))
+    return _queue_redirect()
 
 
 @bp.route("/queue/resolve", methods=["POST"])
@@ -252,7 +280,30 @@ def queue_resolve():
         flash(str(exc), "error")
     else:
         flash(f"Recorded a verdict on {review_id}.", "notice")
-    return redirect(url_for("ui.review_queue"))
+    return _queue_redirect()
+
+
+@bp.route("/queue/release", methods=["POST"])
+def queue_release():
+    service: ModerationService = current_app.extensions["ui_moderation_service"]
+    try:
+        service.release(request.form.get("review_id", ""))
+    except BatchProblem as exc:
+        flash(str(exc), "error")
+    else:
+        flash("Released the item to the pending queue.", "notice")
+    return _queue_redirect()
+
+
+@bp.route("/queue/verify", methods=["POST"])
+def queue_verify():
+    service: ModerationService = current_app.extensions["ui_moderation_service"]
+    status = service.verify()
+    if status is None:
+        flash("There is no durable audit log in memory mode.", "warning")
+    else:
+        flash(str(status), "notice" if status.valid else "error")
+    return _queue_redirect()
 
 
 # -- application factory -------------------------------------------------
@@ -289,9 +340,18 @@ def create_app(config: AppConfig | None = None) -> Flask:
         )
 
     app.extensions["ui_audit_service"] = AuditService(config)
-    app.extensions["ui_moderation_service"] = ModerationService(config)
-    app.extensions["ui_rate_limiter"] = RateLimiter(
-        per_minute=config.rate_limit_per_minute, burst=config.rate_limit_burst
+    moderation = ModerationService(config)
+    app.extensions["ui_moderation_service"] = moderation
+    app.extensions["ui_rate_limiter"] = (
+        SQLiteRateLimiter(
+            moderation.store.database,
+            per_minute=config.rate_limit_per_minute,
+            burst=config.rate_limit_burst,
+        )
+        if isinstance(moderation.store, DatabaseStore)
+        else RateLimiter(
+            per_minute=config.rate_limit_per_minute, burst=config.rate_limit_burst
+        )
     )
 
     app.before_request(_check_csrf)
@@ -339,6 +399,26 @@ def create_app(config: AppConfig | None = None) -> Flask:
                 description="Something went wrong handling that request.",
             ),
             500,
+        )
+
+    @app.errorhandler(StorageError)
+    @app.errorhandler(AuditLogError)
+    def _storage_error(exc):
+        app.logger.error("moderation storage failed", exc_info=True)
+        if request.path == "/readyz":
+            return {"status": "unavailable"}, 503
+        return (
+            render_template(
+                "error.html",
+                code=503,
+                name="Storage unavailable",
+                description=(
+                    "The moderation store could not complete this request. "
+                    "Retry shortly; if the problem persists, contact the operator."
+                ),
+            ),
+            503,
+            {"Retry-After": "1"},
         )
 
     if not app.debug:  # pragma: no cover - logging setup

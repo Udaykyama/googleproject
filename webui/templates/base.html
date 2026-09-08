@@ -9,9 +9,10 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
+<a class="skip-link" href="#main-content">Skip to main content</a>
 <header class="site">
   <a class="brand" href="{{ url_for('ui.index') }}">Trust &amp; Safety showcases</a>
-  <nav>
+  <nav aria-label="Main navigation">
     <a href="{{ url_for('ui.inbox') }}">InboxReady</a>
     <a href="{{ url_for('ui.reviews') }}">Review moderation</a>
     <a href="{{ url_for('ui.review_queue') }}">Queue</a>
@@ -22,7 +23,8 @@
   <strong>{{ 'Live DNS' if app_config.live_dns else 'Demo mode' }}.</strong>
   {% if app_config.live_dns %}
     This instance resolves real domains, rate limited to
-    {{ app_config.rate_limit_per_minute }} audits per minute per client with a
+    {{ app_config.rate_limit_per_minute }} audits per minute per client
+    {% if app_config.storage != 'sqlite' %}per worker{% endif %} with a
     {{ app_config.dns_query_budget }}-query ceiling per audit.
   {% else %}
     DNS lookups are disabled; audits run against the bundled fixtures only.
@@ -34,13 +36,13 @@
   {% if messages %}
     <ul class="flashes">
       {% for category, message in messages %}
-        <li class="flash flash-{{ category }}">{{ message }}</li>
+        <li class="flash flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</li>
       {% endfor %}
     </ul>
   {% endif %}
 {% endwith %}
 
-<main>
+<main id="main-content" tabindex="-1">
 {% block content %}{% endblock %}
 </main>
 

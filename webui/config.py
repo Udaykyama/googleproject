@@ -25,6 +25,10 @@ CLI does not. Two settings in particular are not cosmetic:
         A real :class:`~fake_review_detector.queue.ReviewQueue` and a real
         :class:`~fake_review_detector.audit.AuditLog` with its anchor. Requires
         ``DATA_DIR``, a persistent disk, and **exactly one instance**.
+    ``sqlite``
+        Queue, decision log, and rate limits share a transactional database on
+        a persistent local disk. Multiple workers on one host are supported.
+        Requires ``DATA_DIR`` and a stable ``SECRET_KEY``.
 
 The UI states which mode is active on every page, so nobody reads a durable
 guarantee into an ephemeral deployment.
@@ -33,15 +37,17 @@ guarantee into an ephemeral deployment.
 from __future__ import annotations
 
 import os
+import math
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
-__all__ = ["AppConfig", "ConfigError", "MEMORY", "FILE"]
+__all__ = ["AppConfig", "ConfigError", "MEMORY", "FILE", "SQLITE"]
 
 MEMORY = "memory"
 FILE = "file"
+SQLITE = "sqlite"
 
 #: Where the repository's demo assets live when running from a checkout.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -50,8 +56,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 def _default_demo_dir() -> Path | None:
     """The bundled ``examples/`` directory, when running from a checkout."""
 
-    candidate = _REPO_ROOT / "examples"
-    return candidate if candidate.is_dir() else None
+    for candidate in (_REPO_ROOT / "examples", Path(__file__).resolve().parent / "demo"):
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 class ConfigError(ValueError):
@@ -93,8 +101,8 @@ def _positive_float(env: Mapping[str, str], name: str, default: float) -> float:
         value = float(raw)
     except ValueError:
         raise ConfigError(f"{name} must be a number, got {raw!r}") from None
-    if value <= 0:
-        raise ConfigError(f"{name} must be greater than zero, got {value}")
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigError(f"{name} must be finite and greater than zero, got {value}")
     return value
 
 
@@ -129,16 +137,54 @@ class AppConfig:
     #: ``X-Forwarded-For`` is ignored, because trusting a spoofable header
     #: would let a client evade the rate limit by varying it.
     trusted_proxy_hops: int = 0
+    audit_workers: int = 4
+    queue_page_size: int = 50
+    sqlite_timeout: float = 5.0
+
+    def __post_init__(self) -> None:
+        if self.storage not in {MEMORY, FILE, SQLITE}:
+            raise ConfigError(f"unknown storage mode {self.storage!r}")
+        if self.persistent and self.data_dir is None:
+            raise ConfigError(f"STORAGE={self.storage} requires DATA_DIR")
+        if not isinstance(self.secret_key, str) or not self.secret_key.strip():
+            raise ConfigError("SECRET_KEY must be a non-empty string")
+        for name in (
+            "max_upload_bytes", "max_reviews", "dns_query_budget", "audit_workers",
+            "queue_page_size", "rate_limit_per_minute", "rate_limit_burst",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ConfigError(f"{name.upper()} must be a positive integer")
+        if self.queue_page_size > 200:
+            raise ConfigError("QUEUE_PAGE_SIZE must not exceed 200")
+        for name in ("dns_timeout", "audit_deadline", "sqlite_timeout"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0
+            ):
+                raise ConfigError(f"{name.upper()} must be finite and greater than zero")
+        if (
+            isinstance(self.trusted_proxy_hops, bool)
+            or not isinstance(self.trusted_proxy_hops, int)
+            or self.trusted_proxy_hops < 0
+        ):
+            raise ConfigError("TRUSTED_PROXY_HOPS must be a non-negative integer")
 
     @property
     def persistent(self) -> bool:
-        return self.storage == FILE
+        return self.storage in {FILE, SQLITE}
 
     @property
     def storage_summary(self) -> str:
         """One line for the UI banner. Deliberately blunt."""
 
-        if self.persistent:
+        if self.storage == SQLITE:
+            return (
+                "Queue and audit log use transactional SQLite storage. Multiple "
+                "workers on this host share the same persistent local database."
+            )
+        if self.storage == FILE:
             return (
                 "Queue and audit log are written to disk. This requires a "
                 "persistent volume and exactly one instance."
@@ -169,16 +215,16 @@ class AppConfig:
         env = os.environ if env is None else env
 
         storage = (env.get("STORAGE") or MEMORY).strip().lower()
-        if storage not in {MEMORY, FILE}:
+        if storage not in {MEMORY, FILE, SQLITE}:
             raise ConfigError(
-                f"STORAGE must be {MEMORY!r} or {FILE!r}, got {storage!r}"
+                f"STORAGE must be {MEMORY!r}, {FILE!r}, or {SQLITE!r}, got {storage!r}"
             )
 
         raw_data_dir = (env.get("DATA_DIR") or "").strip()
         data_dir = Path(raw_data_dir).expanduser().resolve() if raw_data_dir else None
-        if storage == FILE and data_dir is None:
+        if storage in {FILE, SQLITE} and data_dir is None:
             raise ConfigError(
-                "STORAGE=file needs DATA_DIR to point at a persistent directory. "
+                f"STORAGE={storage} needs DATA_DIR to point at a persistent directory. "
                 "Without one the audit log would be discarded on restart, which "
                 "is exactly the tampering the log exists to detect."
             )
@@ -193,6 +239,11 @@ class AppConfig:
 
         secret_key = env.get("SECRET_KEY") or ""
         if not secret_key:
+            if storage == SQLITE:
+                raise ConfigError(
+                    "STORAGE=sqlite requires a stable SECRET_KEY shared by every "
+                    "worker, or session cookies and CSRF tokens will fail between workers."
+                )
             # Ephemeral: sessions, and therefore CSRF tokens, do not survive a
             # restart. Fine for a demo, wrong for anything multi-instance.
             secret_key = secrets.token_urlsafe(32)
@@ -221,4 +272,7 @@ class AppConfig:
             trusted_proxy_hops=_bounded_int(
                 env, "TRUSTED_PROXY_HOPS", cls.trusted_proxy_hops, minimum=0
             ),
+            audit_workers=_bounded_int(env, "AUDIT_WORKERS", cls.audit_workers),
+            queue_page_size=_bounded_int(env, "QUEUE_PAGE_SIZE", cls.queue_page_size),
+            sqlite_timeout=_positive_float(env, "SQLITE_TIMEOUT", cls.sqlite_timeout),
         )

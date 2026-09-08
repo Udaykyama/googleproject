@@ -31,13 +31,13 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Protocol
 
 from .errors import AuditLogError
 from .models import ModerationDecision, Review, utc_now_iso
 from .policy import Policy
 
-__all__ = ["Anchor", "AuditLog", "AuditRecord", "ChainStatus", "replay"]
+__all__ = ["Anchor", "AuditLog", "AuditRecord", "ChainStatus", "verify_records", "replay"]
 
 GENESIS_HASH = "0" * 32
 
@@ -67,6 +67,42 @@ class AuditRecord:
             "record_hash": self.record_hash,
             "decision": self.decision.to_dict(),
         }
+
+    @classmethod
+    def create(
+        cls, sequence: int, decision: ModerationDecision, previous_hash: str
+    ) -> "AuditRecord":
+        payload = {
+            "sequence": sequence,
+            "recorded_at": utc_now_iso(),
+            "previous_hash": previous_hash,
+            "decision": decision.to_dict(),
+        }
+        return cls(
+            sequence=sequence,
+            decision=decision,
+            previous_hash=previous_hash,
+            record_hash=_record_hash(previous_hash, payload),
+            recorded_at=payload["recorded_at"],
+        )
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "AuditRecord":
+        if not isinstance(payload, dict):
+            raise ValueError("audit record must be an object")
+        sequence = payload.get("sequence")
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+            raise ValueError("audit sequence must be a positive integer")
+        for field in ("previous_hash", "record_hash", "recorded_at"):
+            if not isinstance(payload.get(field), str):
+                raise ValueError(f"audit {field} must be a string")
+        return cls(
+            sequence=sequence,
+            decision=ModerationDecision.from_dict(payload["decision"]),
+            previous_hash=payload["previous_hash"],
+            record_hash=payload["record_hash"],
+            recorded_at=payload["recorded_at"],
+        )
 
 
 @dataclass(frozen=True)
@@ -177,20 +213,14 @@ class AuditLog:
         lines: list[str] = []
         for decision in decisions:
             sequence += 1
-            payload = {
-                "sequence": sequence,
-                "recorded_at": utc_now_iso(),
-                "previous_hash": previous_hash,
-                "decision": decision.to_dict(),
-            }
-            payload["record_hash"] = _record_hash(previous_hash, payload)
-            previous_hash = payload["record_hash"]
-            lines.append(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+            record = AuditRecord.create(sequence, decision, previous_hash)
+            previous_hash = record.record_hash
+            lines.append(json.dumps(record.to_dict(), sort_keys=True, ensure_ascii=False))
 
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            # Append-and-flush so a crash cannot leave a partial record that
-            # would look like tampering on the next verify.
+            # Flush before advancing the anchor. An interrupted append is
+            # reported as corruption/staleness rather than silently accepted.
             with open(self.path, "a", encoding="utf-8") as handle:
                 handle.write("\n".join(lines) + "\n")
                 handle.flush()
@@ -238,7 +268,7 @@ class AuditLog:
             raise AuditLogError(
                 f"cannot read audit anchor {self.anchor_path}: {exc}"
             ) from exc
-        except json.JSONDecodeError as exc:
+        except (UnicodeError, json.JSONDecodeError) as exc:
             raise AuditLogError(f"{self.anchor_path} is not valid JSON: {exc}") from exc
         if not isinstance(payload, dict):
             raise AuditLogError(f"{self.anchor_path} must contain a JSON object")
@@ -255,24 +285,21 @@ class AuditLog:
             handle = open(self.path, "r", encoding="utf-8")
         except OSError as exc:
             raise AuditLogError(f"cannot read audit log {self.path}: {exc}") from exc
-        with handle:
-            for line_number, line in enumerate(handle, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    payload = json.loads(line)
-                    yield AuditRecord(
-                        sequence=payload["sequence"],
-                        decision=ModerationDecision.from_dict(payload["decision"]),
-                        previous_hash=payload["previous_hash"],
-                        record_hash=payload["record_hash"],
-                        recorded_at=payload["recorded_at"],
-                    )
-                except (json.JSONDecodeError, KeyError, ValueError) as exc:
-                    raise AuditLogError(
-                        f"{self.path} line {line_number} is not a valid audit record: {exc}"
-                    ) from exc
+        try:
+            with handle:
+                for line_number, line in enumerate(handle, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                        yield AuditRecord.from_dict(payload)
+                    except (KeyError, TypeError, ValueError, RecursionError) as exc:
+                        raise AuditLogError(
+                            f"{self.path} line {line_number} is not a valid audit record: {exc}"
+                        ) from exc
+        except (OSError, UnicodeError) as exc:
+            raise AuditLogError(f"cannot read audit log {self.path}: {exc}") from exc
 
     def verify(self, *, check_anchor: bool = True) -> ChainStatus:
         """Recompute the chain and report the first inconsistency.
@@ -281,24 +308,30 @@ class AuditLog:
         compared against it, which is what catches truncation.
         """
 
-        previous_hash = GENESIS_HASH
-        expected_sequence = 0
-        count = 0
-
         try:
-            records = list(self.read())
+            anchor = self.read_anchor() if check_anchor else None
         except AuditLogError as exc:
-            return ChainStatus(valid=False, records=0, broken_at=None, reason=str(exc))
+            return ChainStatus(valid=False, records=0, reason=str(exc))
+        return verify_records(self.read(), anchor)
 
+    def decisions(self) -> list[ModerationDecision]:
+        return [record.decision for record in self.read()]
+
+
+def verify_records(records: Iterable[AuditRecord], anchor: Anchor | None = None) -> ChainStatus:
+    """Verify a chain incrementally without retaining the decision history."""
+
+    previous_hash = GENESIS_HASH
+    count = 0
+    try:
         for record in records:
             count += 1
-            expected_sequence += 1
-            if record.sequence != expected_sequence:
+            if record.sequence != count:
                 return ChainStatus(
                     valid=False,
                     records=count,
                     broken_at=count,
-                    reason=f"expected sequence {expected_sequence}, found {record.sequence}",
+                    reason=f"expected sequence {count}, found {record.sequence}",
                 )
             if record.previous_hash != previous_hash:
                 return ChainStatus(
@@ -321,58 +354,51 @@ class AuditLog:
                     reason="record contents do not match record_hash",
                 )
             previous_hash = record.record_hash
+    except AuditLogError as exc:
+        return ChainStatus(valid=False, records=count, reason=str(exc))
+    except (TypeError, ValueError) as exc:
+        return ChainStatus(
+            valid=False, records=count, broken_at=count,
+            reason=f"invalid audit record: {exc}",
+        )
 
-        if not check_anchor:
-            return ChainStatus(valid=True, records=count, anchor_checked=False)
+    if anchor is None:
+        return ChainStatus(valid=True, records=count, anchor_checked=False)
+    if count < anchor.records:
+        return ChainStatus(
+            valid=False,
+            records=count,
+            broken_at=count + 1,
+            reason=f"log truncated: anchor expects {anchor.records} record(s), found {count}",
+            anchor_checked=True,
+        )
+    if count > anchor.records:
+        return ChainStatus(
+            valid=False,
+            records=count,
+            reason=(
+                f"anchor is stale: expects {anchor.records} record(s), "
+                f"found {count}. Re-anchor if this growth is expected."
+            ),
+            anchor_checked=True,
+        )
+    if previous_hash != anchor.head_hash:
+        return ChainStatus(
+            valid=False,
+            records=count,
+            broken_at=count,
+            reason="head hash does not match the anchor",
+            anchor_checked=True,
+        )
+    return ChainStatus(valid=True, records=count, anchor_checked=True)
 
-        try:
-            anchor = self.read_anchor()
-        except AuditLogError as exc:
-            return ChainStatus(valid=False, records=count, reason=str(exc))
 
-        if anchor is None:
-            return ChainStatus(valid=True, records=count, anchor_checked=False)
-
-        if count < anchor.records:
-            return ChainStatus(
-                valid=False,
-                records=count,
-                broken_at=count + 1,
-                reason=(
-                    f"log truncated: anchor expects {anchor.records} record(s), "
-                    f"found {count}"
-                ),
-                anchor_checked=True,
-            )
-        if count > anchor.records:
-            # More records than the anchor knows about. Benign if the anchor is
-            # simply stale, so it is reported rather than silently accepted.
-            return ChainStatus(
-                valid=False,
-                records=count,
-                reason=(
-                    f"anchor is stale: expects {anchor.records} record(s), "
-                    f"found {count}. Re-anchor if this growth is expected."
-                ),
-                anchor_checked=True,
-            )
-        if previous_hash != anchor.head_hash:
-            return ChainStatus(
-                valid=False,
-                records=count,
-                broken_at=count,
-                reason="head hash does not match the anchor",
-                anchor_checked=True,
-            )
-
-        return ChainStatus(valid=True, records=count, anchor_checked=True)
-
-    def decisions(self) -> list[ModerationDecision]:
-        return [record.decision for record in self.read()]
+class AuditReader(Protocol):
+    def read(self) -> Iterator[AuditRecord]: ...
 
 
 def replay(
-    log: AuditLog, reviews: Iterable[Review | dict], policy: Policy | None = None
+    log: AuditReader, reviews: Iterable[Review | dict], policy: Policy | None = None
 ) -> list[dict]:
     """Re-derive decisions and report where they differ from the log.
 

@@ -26,7 +26,8 @@ from .errors import ModerationError, PolicyError, ValidationError
 from .evaluation import evaluate, load_labelled, threshold_sweep
 from .models import Action
 from .policy import Policy
-from .queue import Outcome, ReviewQueue
+from .queue import Outcome, QueueState, ReviewQueue
+from .sqlite_store import SQLiteStore
 
 _ACTION_LABEL = {
     Action.ALLOW: "ALLOW",
@@ -41,7 +42,7 @@ def _load_json(path: Path) -> list:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise ModerationError(f"cannot read {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise ModerationError(f"{path} is not valid JSON: {exc}") from exc
     if not isinstance(payload, list):
         raise ModerationError(f"{path} must contain a JSON array of reviews")
@@ -68,8 +69,24 @@ def _format_report(result, verbose: bool = False) -> str:
 
 
 def _cmd_score(args: argparse.Namespace) -> int:
+    if args.database and (args.audit_log or args.queue or args.anchor):
+        raise ModerationError("--database replaces --queue, --audit-log, and --anchor")
+    if args.anchor and not args.audit_log:
+        raise ModerationError("--anchor requires --audit-log")
     policy = _load_policy(args.policy)
     result = moderate_batch(_load_json(args.reviews_file), policy)
+
+    added = None
+    destination = args.database or args.queue
+    if args.database:
+        added = SQLiteStore(args.database).enqueue(result.decisions)
+    else:
+        if args.audit_log:
+            AuditLog(args.audit_log, args.anchor).append(result.decisions)
+        if args.queue:
+            review_queue = ReviewQueue(args.queue)
+            added = review_queue.enqueue(result.decisions)
+            review_queue.save()
 
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
@@ -91,13 +108,11 @@ def _cmd_score(args: argparse.Namespace) -> int:
             for error in result.errors:
                 print(f"  - {error}", file=sys.stderr)
 
-    if args.audit_log:
-        AuditLog(args.audit_log, getattr(args, "anchor", None)).append(result.decisions)
-    if args.queue:
-        review_queue = ReviewQueue(args.queue)
-        added = review_queue.enqueue(result.decisions)
-        review_queue.save()
-        print(f"{added} item(s) added to {args.queue}")
+    if added is not None:
+        print(
+            f"{added} item(s) added to {destination}",
+            file=sys.stderr if args.json else sys.stdout,
+        )
 
     return 0
 
@@ -148,15 +163,18 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     if not labelled:
         raise ModerationError("no usable labelled reviews")
 
-    result = calibrate(
-        labelled,
-        policy,
-        objective=args.objective,
-        recall_floor=args.recall_floor,
-        test_fraction=args.test_fraction,
-        salt=args.salt,
-        step=args.step,
-    )
+    try:
+        result = calibrate(
+            labelled,
+            policy,
+            objective=args.objective,
+            recall_floor=args.recall_floor,
+            test_fraction=args.test_fraction,
+            salt=args.salt,
+            step=args.step,
+        )
+    except ValueError as exc:
+        raise ModerationError(str(exc)) from exc
 
     if args.json:
         print(json.dumps(result.to_dict(), indent=2))
@@ -184,11 +202,19 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
 
 
 def _cmd_queue(args: argparse.Namespace) -> int:
-    review_queue = ReviewQueue(args.queue)
+    review_queue = (
+        SQLiteStore(args.database)
+        if args.database
+        else ReviewQueue(args.queue or Path("queue.json"))
+    )
 
-    if args.claim:
+    if args.claim is not None:
         items = review_queue.claim(args.claim, limit=args.limit)
-        review_queue.save()
+        if isinstance(review_queue, ReviewQueue):
+            review_queue.save()
+        if args.json:
+            print(json.dumps([item.to_dict() for item in items], indent=2))
+            return 0
         if not items:
             print("nothing pending")
         for item in items:
@@ -203,11 +229,29 @@ def _cmd_queue(args: argparse.Namespace) -> int:
         item = review_queue.resolve(
             args.resolve, args.moderator, Outcome(args.outcome), args.note
         )
-        review_queue.save()
-        print(f"{item.review_id} resolved as {item.outcome.value} by {item.resolved_by}")
+        if isinstance(review_queue, ReviewQueue):
+            review_queue.save()
+        if args.json:
+            print(json.dumps(item.to_dict(), indent=2))
+        else:
+            print(f"{item.review_id} resolved as {item.outcome.value} by {item.resolved_by}")
         return 0
 
-    stats = review_queue.stats()
+    if args.release:
+        review_queue.release(args.release)
+        if isinstance(review_queue, ReviewQueue):
+            review_queue.save()
+        if args.json:
+            print(json.dumps({"review_id": args.release, "state": "pending"}))
+        else:
+            print(f"{args.release} released to the pending queue")
+        return 0
+
+    snapshot = (
+        review_queue.snapshot(limit=args.page_size, offset=args.offset, state=args.state)
+        if args.list else None
+    )
+    stats = snapshot.stats if snapshot else review_queue.stats()
     if args.json:
         print(json.dumps(stats, indent=2))
         return 0
@@ -222,16 +266,26 @@ def _cmd_queue(args: argparse.Namespace) -> int:
             f"{stats['outcomes']['overturned']} overturned "
             f"(overturn rate {stats['overturn_rate']:.1%})"
         )
-    if args.list:
-        for item in review_queue.pending():
+    if snapshot:
+        for item in snapshot.items:
             print(f"  {item.review_id}  score={item.decision.score}  queued {item.queued_at}")
+        if snapshot.has_next:
+            print(f"More items available; use --offset {args.offset + args.page_size}.")
     return 0
 
 
-def _cmd_verify(args: argparse.Namespace) -> int:
-    log = AuditLog(args.audit_log, args.anchor)
+def _open_log(args: argparse.Namespace) -> AuditLog | SQLiteStore:
+    if args.database:
+        if args.anchor or getattr(args, "re_anchor", False):
+            raise ModerationError("SQLite keeps its anchor transactionally; file anchor flags do not apply")
+        return SQLiteStore(args.database, create=False)
+    return AuditLog(args.audit_log, args.anchor)
 
-    if args.re_anchor:
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    log = _open_log(args)
+
+    if args.re_anchor and isinstance(log, AuditLog):
         anchor = log.write_anchor()
         print(f"anchored {anchor.records} record(s) at {anchor.head_hash}")
         return 0
@@ -247,7 +301,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 def _cmd_replay(args: argparse.Namespace) -> int:
     policy = _load_policy(args.policy)
     differences = replay(
-        AuditLog(args.audit_log, args.anchor), _load_json(args.reviews_file), policy
+        _open_log(args), _load_json(args.reviews_file), policy
     )
     if args.json:
         print(json.dumps(differences, indent=2))
@@ -257,6 +311,20 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         for difference in differences:
             print(f"{difference['review_id']}: {difference['difference']} — {difference['detail']}")
     return 1 if differences else 0
+
+
+def _positive_int(raw: str) -> int:
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
+
+
+def _nonnegative_int(raw: str) -> int:
+    value = int(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -276,6 +344,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Anchor file for --audit-log. Defaults to the log path plus '.anchor'.",
     )
     score.add_argument("--queue", type=Path, help="Add items needing review to this queue.")
+    score.add_argument(
+        "--database", type=Path,
+        help="Atomically store decisions and queued items in a shared SQLite database.",
+    )
     score.add_argument("--json", action="store_true", help="Emit JSON.")
     score.add_argument("--verbose", action="store_true", help="Show signal evidence.")
     score.set_defaults(func=_cmd_score)
@@ -287,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--policy", type=Path)
     evaluate_parser.add_argument("--threshold", type=int, help="Flag at this score.")
     evaluate_parser.add_argument("--sweep", action="store_true", help="Report every threshold.")
-    evaluate_parser.add_argument("--step", type=int, default=5, help="Sweep step size.")
+    evaluate_parser.add_argument("--step", type=_positive_int, default=5, help="Sweep step size.")
     evaluate_parser.add_argument("--json", action="store_true")
     evaluate_parser.set_defaults(func=_cmd_evaluate)
 
@@ -317,16 +389,23 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate_parser.add_argument(
         "--salt", default="calibration-v1", help="Changes which authors land in which split."
     )
-    calibrate_parser.add_argument("--step", type=int, default=5, help="Sweep step size.")
+    calibrate_parser.add_argument("--step", type=_positive_int, default=5, help="Sweep step size.")
     calibrate_parser.add_argument("--json", action="store_true")
     calibrate_parser.set_defaults(func=_cmd_calibrate)
 
     queue_parser = subparsers.add_parser("queue", help="Inspect and work the review queue.")
-    queue_parser.add_argument("--queue", type=Path, default=Path("queue.json"))
-    queue_parser.add_argument("--list", action="store_true", help="List pending items.")
-    queue_parser.add_argument("--claim", metavar="MODERATOR", help="Claim pending items.")
-    queue_parser.add_argument("--limit", type=int, default=5, help="How many to claim.")
-    queue_parser.add_argument("--resolve", metavar="REVIEW_ID", help="Resolve an item.")
+    queue_storage = queue_parser.add_mutually_exclusive_group()
+    queue_storage.add_argument("--queue", type=Path, help="JSON queue (default: queue.json).")
+    queue_storage.add_argument("--database", type=Path, help="Shared SQLite database.")
+    queue_actions = queue_parser.add_mutually_exclusive_group()
+    queue_actions.add_argument("--list", action="store_true", help="List a page of items.")
+    queue_actions.add_argument("--claim", metavar="MODERATOR", help="Claim pending items.")
+    queue_actions.add_argument("--resolve", metavar="REVIEW_ID", help="Resolve an item.")
+    queue_actions.add_argument("--release", metavar="REVIEW_ID", help="Release a claimed item.")
+    queue_parser.add_argument("--limit", type=_positive_int, default=5, help="How many to claim.")
+    queue_parser.add_argument("--page-size", type=_positive_int, default=50, help="Items per --list page.")
+    queue_parser.add_argument("--offset", type=_nonnegative_int, default=0, help="Offset for --list.")
+    queue_parser.add_argument("--state", choices=[s.value for s in QueueState], default="pending")
     queue_parser.add_argument("--moderator", help="Who is resolving.")
     queue_parser.add_argument(
         "--outcome", choices=[o.value for o in Outcome], help="Moderator verdict."
@@ -336,7 +415,9 @@ def build_parser() -> argparse.ArgumentParser:
     queue_parser.set_defaults(func=_cmd_queue)
 
     verify = subparsers.add_parser("verify", help="Check the audit log has not been altered.")
-    verify.add_argument("--audit-log", type=Path, required=True)
+    verify_source = verify.add_mutually_exclusive_group(required=True)
+    verify_source.add_argument("--audit-log", type=Path)
+    verify_source.add_argument("--database", type=Path)
     verify.add_argument(
         "--anchor",
         type=Path,
@@ -362,7 +443,9 @@ def build_parser() -> argparse.ArgumentParser:
         "replay", help="Re-derive decisions and diff them against the audit log."
     )
     replay_parser.add_argument("reviews_file", type=Path)
-    replay_parser.add_argument("--audit-log", type=Path, required=True)
+    replay_source = replay_parser.add_mutually_exclusive_group(required=True)
+    replay_source.add_argument("--audit-log", type=Path)
+    replay_source.add_argument("--database", type=Path)
     replay_parser.add_argument(
         "--anchor", type=Path, help="Anchor file. Defaults to the log path plus '.anchor'."
     )

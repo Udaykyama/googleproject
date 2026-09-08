@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import json
 
 from support import SRC, finding_codes  # noqa: F401
 
@@ -65,6 +66,14 @@ class ReputationTests(unittest.TestCase):
         self.assertIn(
             "REP_SPAM_RATE_INVALID", finding_codes(check_reputation(spam_rate=-0.5, bulk=False))
         )
+
+    def test_nonfinite_and_impossible_rates_never_pass(self):
+        for rate in (float("nan"), float("inf"), float("-inf"), 101):
+            with self.subTest(rate=rate):
+                result = check_reputation(spam_rate=rate)
+                self.assertIn("REP_SPAM_RATE_INVALID", finding_codes(result))
+                self.assertNotIn("REP_SPAM_RATE_OK", finding_codes(result))
+                json.dumps(result.data, allow_nan=False)
 
 
 if __name__ == "__main__":

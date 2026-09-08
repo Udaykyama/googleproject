@@ -383,3 +383,24 @@ def test_anchor_write_is_atomic(tmp_path):
 
     leftovers = list(tmp_path.glob("*.tmp"))
     assert leftovers == []
+
+
+@pytest.mark.parametrize("content", [b"\xff", b"[]\n", b'{"sequence": null}\n'])
+def test_invalid_record_encoding_and_shape_are_reported(tmp_path, content):
+    path = tmp_path / "audit.jsonl"
+    path.write_bytes(content)
+    assert AuditLog(path).verify().valid is False
+
+
+def test_verification_stops_at_the_first_broken_record(tmp_path, monkeypatch):
+    from fake_review_detector.audit import GENESIS_HASH, AuditRecord
+
+    log = AuditLog(tmp_path / "audit.jsonl")
+    bad = AuditRecord.create(2, moderate_batch(batch()).decisions[0], GENESIS_HASH)
+
+    def records():
+        yield bad
+        pytest.fail("verification eagerly consumed the rest of the history")
+
+    monkeypatch.setattr(log, "read", records)
+    assert log.verify().broken_at == 1

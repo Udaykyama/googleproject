@@ -29,21 +29,26 @@ dns = ["dnspython>=2.4"]
 # third-party packages installed, which .github/workflows/tests.yml asserts.
 # 3.1.3 is the first release fixing GHSA-68rp-wp8r-4726.
 web = ["flask>=3.1.3"]
+server = ["flask>=3.1.3", "gunicorn>=23.0"]
 
 [project.scripts]
 inboxready = "inboxready.cli:main"
 fake-review-detector = "fake_review_detector.cli:main"
 
-# Two source roots: InboxReady uses a src layout, the detector and the web UI
+# InboxReady uses a src layout, the detector and the web UI
 # sit at the repository root so `python -m fake_review_detector.cli` keeps
 # working from a checkout. Listed explicitly because automatic discovery
 # cannot span both roots.
+# Asset-only namespaces put the existing examples and sample data in the
+# wheel without maintaining duplicate copies under webui/.
 [tool.setuptools]
 packages = [
     "inboxready",
     "inboxready.checks",
     "fake_review_detector",
     "webui",
+    "webui.demo",
+    "webui.data",
 ]
 
 [tool.setuptools.package-dir]
@@ -51,6 +56,10 @@ packages = [
 "inboxready.checks" = "src/inboxready/checks"
 "fake_review_detector" = "fake_review_detector"
 "webui" = "webui"
+"webui.demo" = "examples"
+"webui.data" = "data"
 
 [tool.setuptools.package-data]
 webui = ["templates/*.html", "static/*.css"]
+"webui.demo" = ["fixtures/*.json", "messages/*.eml"]
+"webui.data" = ["sample_reviews.json"]

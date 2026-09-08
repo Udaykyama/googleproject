@@ -28,6 +28,18 @@ body {
 }
 
 main, header.site, .banner, .flashes, footer { max-width: 60rem; margin: 0 auto; }
+main { overflow-wrap: anywhere; min-width: 0; }
+
+.skip-link {
+  position: absolute;
+  inset-inline-start: 1rem;
+  top: -5rem;
+  padding: 0.5rem 1rem;
+  background: var(--bg);
+  border: 2px solid var(--link);
+  z-index: 1;
+}
+.skip-link:focus { top: 0.5rem; }
 
 header.site {
   display: flex;
@@ -60,7 +72,7 @@ h2 { font-size: 1.2rem; margin: 1.5rem 0 0.5rem; }
 h3 { font-size: 1rem; margin: 1.25rem 0 0.4rem; }
 
 .lede { color: var(--muted); margin-top: 0; }
-.hint { color: var(--muted); font-size: 0.85rem; }
+.hint { color: var(--muted); font-size: 0.875rem; }
 
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
 pre {
@@ -74,7 +86,7 @@ pre {
 
 /* -- cards ------------------------------------------------------------- */
 
-.cards { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); }
+.cards { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); }
 .card {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -87,28 +99,32 @@ pre {
 /* -- forms ------------------------------------------------------------- */
 
 form.stack { display: grid; gap: 1rem; margin: 1.5rem 0; }
-form.stack label { display: grid; gap: 0.3rem; font-weight: 600; }
+form.stack label { display: grid; gap: 0.3rem; font-weight: 600; min-width: 0; }
 form.stack label .hint { font-weight: 400; }
-form.stack .row { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
+form.stack .row { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
 
 fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 0.75rem 1rem; }
 legend { font-weight: 600; padding: 0 0.35rem; }
 
-label.choice { display: block; font-weight: 400; }
+form.stack label.choice { display: block; font-weight: 400; }
+label.choice input { margin-inline-end: 0.4rem; }
 
 input[type="text"], input[type="number"], select, textarea {
   width: 100%;
   padding: 0.45rem 0.55rem;
   font: inherit;
+  font-size: 1rem;
+  min-width: 0;
+  max-width: 100%;
   color: var(--ink);
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 4px;
 }
-textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
+textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
 input:focus-visible, select:focus-visible, textarea:focus-visible,
-button:focus-visible, a:focus-visible, summary:focus-visible {
+button:focus-visible, a:focus-visible, summary:focus-visible, .table-scroll:focus-visible {
   outline: 2px solid var(--link);
   outline-offset: 2px;
 }
@@ -125,6 +141,12 @@ button:focus-visible, a:focus-visible, summary:focus-visible {
   text-decoration: none;
   cursor: pointer;
 }
+.button:hover { text-decoration: underline; }
+.button.secondary { color: var(--link); background: var(--bg); }
+
+.pagination { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin: 1rem 0; }
+.pagination a { padding-block: 0.5rem; }
+.table-scroll { max-width: 100%; overflow-x: auto; }
 
 form.inline {
   display: flex;
@@ -137,7 +159,14 @@ form.inline {
   border: 1px solid var(--line);
   border-radius: 6px;
 }
-form.inline label { display: grid; gap: 0.2rem; font-size: 0.85rem; font-weight: 600; }
+form.inline label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  min-width: 0;
+  max-width: 100%;
+}
 form.inline input[type="text"] { min-width: 11rem; }
 form.inline input[type="number"] { width: 6rem; }
 
@@ -201,7 +230,12 @@ form.inline input[type="number"] { width: 6rem; }
 
 .queue-item { border: 1px solid var(--line); border-radius: 6px; padding: 0.75rem 1rem; }
 
-table.decisions { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+table.decisions {
+  width: 100%;
+  min-width: 32rem;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
 table.decisions th, table.decisions td {
   text-align: left;
   vertical-align: top;

@@ -19,9 +19,12 @@ Python's built-in :func:`hash` is salted per process, so hashing goes through
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Iterable, Sequence
+from functools import cached_property
+from itertools import chain
+from typing import Iterable, Iterator, Sequence
 
 from .models import Review
 from .normalize import matching_key, word_shingles
@@ -66,6 +69,8 @@ def _shingle_hash(shingle: str) -> int:
 def minhash_signature(shingles: Iterable[str], num_perm: int = NUM_PERM) -> tuple[int, ...]:
     """MinHash signature for a shingle set. Empty input yields an empty tuple."""
 
+    if isinstance(num_perm, bool) or not isinstance(num_perm, int) or num_perm < 1:
+        raise ValueError("num_perm must be a positive integer")
     hashes = [_shingle_hash(s) for s in shingles]
     if not hashes:
         return ()
@@ -104,23 +109,24 @@ class DuplicateReport:
     #: of who-matched-whom is incomplete.
     truncated: bool = False
 
-    def ids(self) -> set[str]:
-        result: set[str] = set()
+    @cached_property
+    def _partner_index(self) -> dict[str, tuple[tuple[str, float], ...]]:
+        partners: dict[str, list[tuple[str, float]]] = {}
         for pair in self.pairs:
-            result.add(pair.left_id)
-            result.add(pair.right_id)
-        return result
+            partners.setdefault(pair.left_id, []).append((pair.right_id, pair.similarity))
+            partners.setdefault(pair.right_id, []).append((pair.left_id, pair.similarity))
+        return {
+            review_id: tuple(sorted(matches, key=lambda item: (-item[1], item[0])))
+            for review_id, matches in partners.items()
+        }
+
+    def ids(self) -> set[str]:
+        return set(self._partner_index)
 
     def partners(self, review_id: str) -> list[tuple[str, float]]:
         """Reviews that ``review_id`` duplicated, with similarity, for evidence."""
 
-        out: list[tuple[str, float]] = []
-        for pair in self.pairs:
-            if pair.left_id == review_id:
-                out.append((pair.right_id, pair.similarity))
-            elif pair.right_id == review_id:
-                out.append((pair.left_id, pair.similarity))
-        return sorted(out, key=lambda item: (-item[1], item[0]))
+        return list(self._partner_index.get(review_id, ()))
 
 
 def _similar(left: str, right: str, threshold: float) -> float | None:
@@ -132,6 +138,8 @@ def _similar(left: str, right: str, threshold: float) -> float | None:
     avoiding the expensive O(L²) match on obviously dissimilar text.
     """
 
+    if left == right:
+        return 1.0
     matcher = SequenceMatcher(None, left, right)
     if matcher.real_quick_ratio() < threshold:
         return None
@@ -141,8 +149,10 @@ def _similar(left: str, right: str, threshold: float) -> float | None:
     return ratio if ratio >= threshold else None
 
 
-def _exact_candidates(count: int) -> list[tuple[int, int]]:
-    return [(i, j) for i in range(count) for j in range(i + 1, count)]
+def _exact_candidates(count: int) -> Iterator[tuple[int, int]]:
+    for left in range(count):
+        for right in range(left + 1, count):
+            yield left, right
 
 
 #: Largest set of documents compared pairwise inside one LSH bucket.
@@ -151,7 +161,7 @@ _BUCKET_WINDOW = 500
 
 def _lsh_candidates(
     keys: Sequence[str], num_perm: int = NUM_PERM, bands: int = BANDS
-) -> list[tuple[int, int]]:
+) -> Iterator[tuple[int, int]]:
     """Candidate index pairs from MinHash banding.
 
     Documents whose folded key produces no shingles (emoji-only text, for
@@ -159,6 +169,8 @@ def _lsh_candidates(
     are not silently exempt from duplicate detection.
     """
 
+    if bands < 1 or num_perm < 1 or num_perm % bands:
+        raise ValueError("num_perm must be positive and divisible by bands")
     rows = num_perm // bands
     buckets: dict[bytes, list[int]] = {}
     degenerate: dict[str, list[int]] = {}
@@ -178,20 +190,32 @@ def _lsh_candidates(
             ).digest()
             buckets.setdefault(digest, []).append(index)
 
-    pairs: set[tuple[int, int]] = set()
-    for group in list(buckets.values()) + list(degenerate.values()):
+    memberships: list[list[tuple[int, ...]]] = [[] for _ in keys]
+    windows: set[tuple[int, ...]] = set()
+    for group in chain(buckets.values(), degenerate.values()):
         if len(group) < 2:
             continue
         # A pathological bucket would reintroduce the quadratic blow-up, so
         # large buckets are compared in windows. Truncating the bucket instead
         # would silently drop its later members from detection entirely;
-        # windowing keeps every member in some comparison.
+        # windowing avoids discarding the whole tail of a large cluster.
         for start in range(0, len(group), _BUCKET_WINDOW):
-            window = group[start : start + _BUCKET_WINDOW]
-            for position, left in enumerate(window):
-                for right in window[position + 1 :]:
-                    pairs.add((left, right) if left < right else (right, left))
-    return sorted(pairs)
+            window = tuple(group[start : start + _BUCKET_WINDOW])
+            if len(window) < 2 or window in windows:
+                continue
+            windows.add(window)
+            for index in window:
+                memberships[index].append(window)
+    buckets.clear()
+    degenerate.clear()
+    windows.clear()
+
+    # Emit the same lexicographically ordered, unique pairs as before, but
+    # retain only one review's candidate neighbors rather than the whole graph.
+    for left, groups in enumerate(memberships):
+        rights = {right for group in groups for right in group if right > left}
+        for right in sorted(rights):
+            yield left, right
 
 
 def find_duplicates(
@@ -212,12 +236,21 @@ def find_duplicates(
     duplicate pairs, so enumerating them all is quadratic no matter how the
     candidates are generated. Detection only needs a few partners per review,
     so pairs are skipped once a side is at the cap and
-    :attr:`DuplicateReport.truncated` is set. A review with no partner yet is
-    never skipped, so every review that has a true duplicate is still flagged.
-    Both modes apply the cap over the same sorted candidate order, so results
-    stay deterministic.
+    :attr:`DuplicateReport.truncated` is set. The cap and LSH blocking can omit
+    matches, so absence from this report is not proof of unique text. Both
+    modes apply the cap over the same sorted candidate order, so results stay
+    deterministic.
     """
 
+    if isinstance(threshold, bool) or not math.isfinite(threshold) or not 0 < threshold <= 1:
+        raise ValueError("threshold must be finite and within (0, 1]")
+    if (
+        isinstance(exact_max_batch, bool) or not isinstance(exact_max_batch, int)
+        or exact_max_batch < 0
+    ):
+        raise ValueError("exact_max_batch must be a non-negative integer")
+    if isinstance(max_partners, bool) or not isinstance(max_partners, int) or max_partners < 1:
+        raise ValueError("max_partners must be a positive integer")
     reviews = list(reviews)
     count = len(reviews)
     if count < 2:
@@ -234,9 +267,11 @@ def find_duplicates(
 
     pairs: list[DuplicatePair] = []
     compared = 0
+    candidate_count = 0
     truncated = False
     partner_count: dict[int, int] = {}
     for left, right in candidates:
+        candidate_count += 1
         if not texts[left] or not texts[right]:
             continue
         left_partners = partner_count.get(left, 0)
@@ -263,7 +298,7 @@ def find_duplicates(
     return DuplicateReport(
         pairs=tuple(pairs),
         mode=mode,
-        candidate_pairs=len(candidates),
+        candidate_pairs=candidate_count,
         compared_pairs=compared,
         truncated=truncated,
     )

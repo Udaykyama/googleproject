@@ -1,10 +1,7 @@
 """The review-moderation half of the UI, and where its state lives.
 
-Both storage backends are :class:`~fake_review_detector.queue.ReviewQueue`
-instances, so claim, resolve and overturn-rate arithmetic stay the library's
-and cannot drift from what the CLI reports. They differ only in persistence,
-and the mode is explicit so a deployment cannot quietly claim durability it
-does not have:
+Every backend uses the library's queue transitions and overturn-rate
+arithmetic. Storage modes explicitly distinguish demo state from durability:
 
 :class:`MemoryStore`
     A queue that never touches disk, and no audit log at all. Restarting loses
@@ -12,6 +9,8 @@ does not have:
 :class:`FileStore`
     The queue on disk, plus the hash-chained
     :class:`~fake_review_detector.audit.AuditLog` and its anchor.
+:class:`DatabaseStore`
+    Transactional SQLite queue and decision history, safe across workers.
 
 Both serialise writes behind a lock, because a WSGI server handles requests on
 several threads while the underlying files assume a single writer. The lock is
@@ -23,24 +22,25 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Protocol, Sequence
 
-from fake_review_detector.audit import AuditLog
+from fake_review_detector.audit import AuditLog, ChainStatus
 from fake_review_detector.engine import BatchResult, moderate_batch
-from fake_review_detector.errors import ModerationError
+from fake_review_detector.errors import ModerationError, StorageError
 from fake_review_detector.models import ModerationDecision
 from fake_review_detector.policy import Policy
-from fake_review_detector.queue import Outcome, QueueItem, ReviewQueue
+from fake_review_detector.queue import Outcome, QueueSnapshot, QueueState, ReviewQueue
+from fake_review_detector.sqlite_store import SQLiteStore
 
-from .config import AppConfig
+from .config import SQLITE, AppConfig
 
 __all__ = [
     "BatchProblem",
     "ModerationService",
     "MemoryStore",
     "FileStore",
+    "DatabaseStore",
     "Snapshot",
     "Outcome",
 ]
@@ -56,12 +56,18 @@ class BatchProblem(ValueError):
     """A user-facing problem with a submitted batch or queue action."""
 
 
-@dataclass(frozen=True)
-class Snapshot:
-    """A consistent read of the queue for rendering."""
+Snapshot = QueueSnapshot
 
-    items: list[QueueItem]
-    stats: dict
+
+class ModerationStore(Protocol):
+    def enqueue(self, decisions: Sequence[ModerationDecision]) -> int: ...
+    def snapshot(self, *, limit: int, offset: int, state: QueueState | None) -> Snapshot: ...
+    def claim(self, moderator: str, limit: int) -> int: ...
+    def resolve(self, review_id: str, moderator: str, outcome: Outcome, note: str) -> None: ...
+    def release(self, review_id: str) -> None: ...
+    def integrity(self) -> str | None: ...
+    def verify(self) -> ChainStatus | None: ...
+    def healthcheck(self) -> None: ...
 
 
 class _EphemeralQueue(ReviewQueue):
@@ -91,9 +97,9 @@ class MemoryStore:
         with self._lock:
             return self._queue.enqueue(decisions)
 
-    def snapshot(self) -> Snapshot:
+    def snapshot(self, *, limit=50, offset=0, state=None) -> Snapshot:
         with self._lock:
-            return Snapshot(items=self._queue.items(), stats=self._queue.stats())
+            return self._queue.snapshot(limit=limit, offset=offset, state=state)
 
     def claim(self, moderator: str, limit: int) -> int:
         with self._lock:
@@ -110,6 +116,16 @@ class MemoryStore:
 
     def integrity(self) -> str | None:
         return None
+
+    def release(self, review_id: str) -> None:
+        with self._lock:
+            self._queue.release(review_id)
+
+    def verify(self) -> ChainStatus | None:
+        return None
+
+    def healthcheck(self) -> None:
+        pass
 
 
 class FileStore:
@@ -132,16 +148,16 @@ class FileStore:
         with self._lock:
             queue = self._open()
             added = queue.enqueue(decisions)
-            queue.save()
             # Every decision is logged, not only the queued ones: an "allow"
             # is as much a decision as a removal, and appeals turn on it.
             AuditLog(self._log_path).append(decisions)
+            queue.save()
             return added
 
-    def snapshot(self) -> Snapshot:
+    def snapshot(self, *, limit=50, offset=0, state=None) -> Snapshot:
         with self._lock:
             queue = self._open()
-            return Snapshot(items=queue.items(), stats=queue.stats())
+            return queue.snapshot(limit=limit, offset=offset, state=state)
 
     def claim(self, moderator: str, limit: int) -> int:
         with self._lock:
@@ -161,30 +177,89 @@ class FileStore:
                 raise BatchProblem(str(exc)) from exc
             queue.save()
 
+    def release(self, review_id: str) -> None:
+        with self._lock:
+            queue = self._open()
+            queue.release(review_id)
+            queue.save()
+
     def integrity(self) -> str | None:
         """The audit log's own verdict on itself, shown on the queue page."""
 
         with self._lock:
-            if not self._log_path.exists():
+            log = AuditLog(self._log_path)
+            if not self._log_path.exists() and not log.anchor_path.exists():
                 return "No decisions logged yet."
             try:
-                return str(AuditLog(self._log_path).verify())
+                anchor = log.read_anchor()
+                if anchor is None:
+                    return "No anchor found. Run an integrity check before trusting this history."
+                return f"{anchor.records} decision record(s) anchored. Full history not checked on page load."
             except ModerationError as exc:  # pragma: no cover - unreadable log
                 return f"Audit log could not be read: {exc}"
+
+    def verify(self) -> ChainStatus:
+        with self._lock:
+            return AuditLog(self._log_path).verify()
+
+    def healthcheck(self) -> None:
+        with self._lock:
+            self._open()
+
+
+class DatabaseStore:
+    """Web adapter; the same SQLite database can also be worked from the CLI."""
+
+    persistent = True
+
+    def __init__(self, data_dir: Path, *, timeout: float = 5.0) -> None:
+        self.database = SQLiteStore(data_dir / "moderation.sqlite3", timeout=timeout)
+
+    def enqueue(self, decisions: Sequence[ModerationDecision]) -> int:
+        return self.database.enqueue(decisions)
+
+    def snapshot(self, *, limit=50, offset=0, state=None) -> Snapshot:
+        return self.database.snapshot(limit=limit, offset=offset, state=state)
+
+    def claim(self, moderator: str, limit: int) -> int:
+        return len(self.database.claim(moderator, limit))
+
+    def resolve(self, review_id: str, moderator: str, outcome: Outcome, note: str) -> None:
+        self.database.resolve(review_id, moderator, outcome, note)
+
+    def release(self, review_id: str) -> None:
+        self.database.release(review_id)
+
+    def integrity(self) -> str:
+        anchor = self.database.read_anchor()
+        return (
+            f"{anchor.records} decision record(s) stored. "
+            "Full history not checked on page load."
+        )
+
+    def verify(self) -> ChainStatus:
+        return self.database.verify()
+
+    def healthcheck(self) -> None:
+        self.database.healthcheck()
 
 
 class ModerationService:
     """Parses submitted batches, scores them, and owns the queue."""
 
-    def __init__(self, config: AppConfig, store=None) -> None:
+    def __init__(self, config: AppConfig, store: ModerationStore | None = None) -> None:
         self.config = config
         self.policy = Policy()
+        self.store: ModerationStore
         if store is not None:
             self.store = store
         elif config.persistent:
             if config.data_dir is None:  # pragma: no cover - AppConfig forbids it
                 raise ValueError("persistent storage requires a data directory")
-            self.store = FileStore(config.data_dir)
+            self.store = (
+                DatabaseStore(config.data_dir, timeout=config.sqlite_timeout)
+                if config.storage == SQLITE else FileStore(config.data_dir)
+            )
         else:
             self.store = MemoryStore()
 
@@ -212,6 +287,8 @@ class ModerationService:
                 f"That is not valid JSON (line {exc.lineno}, column {exc.colno}: "
                 f"{exc.msg})."
             ) from None
+        except (ValueError, RecursionError):
+            raise BatchProblem("That JSON is nested too deeply or contains an unsupported value.") from None
 
         if isinstance(payload, dict) and isinstance(payload.get("reviews"), list):
             payload = payload["reviews"]
@@ -250,11 +327,31 @@ class ModerationService:
 
     # -- queue ------------------------------------------------------------
 
-    def snapshot(self) -> Snapshot:
-        return self.store.snapshot()
+    def snapshot(self, page=1, state: str = "") -> Snapshot:
+        try:
+            page = int(page)
+        except (TypeError, ValueError):
+            raise BatchProblem("Queue page must be a positive whole number.") from None
+        if not 1 <= page <= 1_000_000_000:
+            raise BatchProblem("Queue page is outside the supported range.")
+        try:
+            parsed_state = QueueState(state) if state else None
+        except ValueError:
+            raise BatchProblem("Choose pending, claimed, resolved, or all queue items.") from None
+        return self.store.snapshot(
+            limit=self.config.queue_page_size,
+            offset=(page - 1) * self.config.queue_page_size,
+            state=parsed_state,
+        )
 
     def integrity(self) -> str | None:
         return self.store.integrity()
+
+    def verify(self) -> ChainStatus | None:
+        return self.store.verify()
+
+    def healthcheck(self) -> None:
+        self.store.healthcheck()
 
     def claim(self, moderator: str, limit) -> int:
         return self.store.claim(_clean_moderator(moderator), _clean_limit(limit))
@@ -264,12 +361,25 @@ class ModerationService:
             parsed = Outcome(outcome)
         except ValueError:
             raise BatchProblem("Choose upheld, overturned, or unclear.") from None
-        self.store.resolve(
-            _clean_review_id(review_id),
-            _clean_moderator(moderator),
-            parsed,
-            (note or "").strip()[:_MAX_NOTE_LENGTH],
-        )
+        note = (note or "").strip()
+        if len(note) > _MAX_NOTE_LENGTH:
+            raise BatchProblem(f"Notes must be at most {_MAX_NOTE_LENGTH} characters.")
+        try:
+            self.store.resolve(
+                _clean_review_id(review_id), _clean_moderator(moderator), parsed, note
+            )
+        except StorageError:
+            raise
+        except ModerationError as exc:
+            raise BatchProblem(str(exc)) from exc
+
+    def release(self, review_id: str) -> None:
+        try:
+            self.store.release(_clean_review_id(review_id))
+        except StorageError:
+            raise
+        except ModerationError as exc:
+            raise BatchProblem(str(exc)) from exc
 
 
 def _clean_moderator(raw: str) -> str:
@@ -298,4 +408,6 @@ def _clean_limit(raw) -> int:
         raise BatchProblem("How many items to claim must be a number.") from None
     if limit < 1:
         raise BatchProblem("Claim at least one item.")
-    return min(limit, _MAX_CLAIM)
+    if limit > _MAX_CLAIM:
+        raise BatchProblem(f"Claim at most {_MAX_CLAIM} items at once.")
+    return limit

@@ -11,6 +11,8 @@ stay under 0.10%, and never reach 0.30%.
 
 from __future__ import annotations
 
+import math
+
 from ..models import CheckResult, Finding, Severity
 
 __all__ = ["check_reputation", "BULK_SENDER_THRESHOLD", "SPAM_RATE_TARGET", "SPAM_RATE_LIMIT"]
@@ -121,11 +123,12 @@ def check_reputation(
         )
         return result
 
-    if spam_rate < 0:
+    if not math.isfinite(spam_rate) or not 0 <= spam_rate <= 100:
+        result.data["spam_rate_percent"] = None
         result.add(
             Finding(
                 code="REP_SPAM_RATE_INVALID",
-                title="Spam rate cannot be negative",
+                title="Spam rate must be a finite percentage between 0 and 100",
                 severity=Severity.WARNING,
                 detail=f"Got {spam_rate}.",
                 remediation="Supply the percentage shown in Postmaster Tools, e.g. 0.08.",

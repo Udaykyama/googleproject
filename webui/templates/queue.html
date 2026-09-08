@@ -2,6 +2,12 @@
 {% block title %}Human review queue{% endblock %}
 
 {% block content %}
+{% macro queue_form_context() -%}
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="page" value="{{ page }}">
+  <input type="hidden" name="state" value="{{ selected_state }}">
+{%- endmacro %}
+
 <h1>Human review queue</h1>
 <p class="lede">
   Everything the engine was not confident enough to allow outright. An
@@ -23,6 +29,11 @@
   </p>
   {% if integrity %}
     <p class="hint">Audit log: {{ integrity }}</p>
+    <form method="post" action="{{ url_for('ui.queue_verify') }}">
+      {{ queue_form_context() }}
+      <button type="submit" class="button secondary">Check audit integrity</button>
+      <p class="hint">Scans the complete decision history. Large logs may take a while.</p>
+    </form>
   {% else %}
     <p class="hint">
       No audit log in this mode. Decisions made here leave no durable record —
@@ -33,22 +44,65 @@
 </section>
 
 <form method="post" action="{{ url_for('ui.queue_claim') }}" class="inline">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  {{ queue_form_context() }}
   <label>Moderator <input type="text" name="moderator" maxlength="64" required autocomplete="off"></label>
   <label>Claim <input type="number" name="limit" value="1" min="1" max="25"></label>
   <button type="submit" class="button">Claim items</button>
 </form>
 
-{% if not items %}
+<h2>Queue items</h2>
+<form method="get" action="{{ url_for('ui.review_queue') }}" class="inline">
+  <label>
+    Queue state
+    <select name="state">
+      <option value="" {% if not selected_state %}selected{% endif %}>All states</option>
+      {% for state in ['pending', 'claimed', 'resolved'] %}
+        <option value="{{ state }}" {% if selected_state == state %}selected{% endif %}>{{ state | capitalize }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit" class="button secondary">Apply filter</button>
+</form>
+
+{% if items %}
   <p class="hint">
-    The queue is empty. Score a batch on the
-    <a href="{{ url_for('ui.reviews') }}">review moderation</a> page with
-    "send anything needing human review to the queue" ticked.
+    Showing {{ snapshot.offset + 1 }} to {{ snapshot.offset + items | length }}
+    of {{ snapshot.total }} {{ selected_state }} item(s).
   </p>
+{% endif %}
+
+{% if snapshot.total > snapshot.limit or page > 1 %}
+  <nav class="pagination" aria-label="Queue pages">
+    {% if page > 1 %}
+      <a href="{{ url_for('ui.review_queue', page=page - 1, state=selected_state) }}" rel="prev">Previous page</a>
+    {% else %}
+      <span class="hint" aria-disabled="true">Previous page</span>
+    {% endif %}
+    <span aria-current="page">Page {{ page }}</span>
+    {% if snapshot.has_next %}
+      <a href="{{ url_for('ui.review_queue', page=page + 1, state=selected_state) }}" rel="next">Next page</a>
+    {% else %}
+      <span class="hint" aria-disabled="true">Next page</span>
+    {% endif %}
+  </nav>
+{% endif %}
+
+{% if not items %}
+  {% if not stats.total %}
+    <p class="hint">
+      The queue is empty. Score a batch on the
+      <a href="{{ url_for('ui.reviews') }}">review moderation</a> page with
+      "send anything needing human review to the queue" ticked.
+    </p>
+  {% elif not snapshot.total %}
+    <p class="hint">No {{ selected_state }} items right now. <a href="{{ url_for('ui.review_queue') }}">Show all queue items.</a></p>
+  {% else %}
+    <p class="hint">There are no items on this page. <a href="{{ url_for('ui.review_queue', state=selected_state) }}">Return to the first page.</a></p>
+  {% endif %}
 {% else %}
   {% for item in items %}
-    <section class="check queue-item">
-      <h3>
+    <section class="check queue-item" aria-labelledby="queue-item-{{ loop.index }}">
+      <h3 id="queue-item-{{ loop.index }}">
         <code>{{ item.review_id }}</code>
         <span class="pill">score {{ item.decision.score }}</span>
         <span class="pill risk-{{ item.decision.risk_level.value }}">{{ item.decision.risk_level.value }}</span>
@@ -81,7 +135,7 @@
 
       {% if item.state.value != 'resolved' %}
         <form method="post" action="{{ url_for('ui.queue_resolve') }}" class="inline">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          {{ queue_form_context() }}
           <input type="hidden" name="review_id" value="{{ item.review_id }}">
           <label>Moderator <input type="text" name="moderator" maxlength="64" required autocomplete="off"></label>
           <label>
@@ -94,6 +148,13 @@
           </label>
           <label>Note <input type="text" name="note" maxlength="500" autocomplete="off"></label>
           <button type="submit" class="button">Record verdict</button>
+        </form>
+      {% endif %}
+      {% if item.state.value == 'claimed' %}
+        <form method="post" action="{{ url_for('ui.queue_release') }}">
+          {{ queue_form_context() }}
+          <input type="hidden" name="review_id" value="{{ item.review_id }}">
+          <button type="submit" class="button secondary">Release claim</button>
         </form>
       {% endif %}
     </section>
