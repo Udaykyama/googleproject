@@ -9,6 +9,8 @@ Subcommands map to the operational tasks the system exists to support::
     python -m fake_review_detector.cli replay   data/sample_reviews.json
     python -m fake_review_detector.cli backup   --database moderation.sqlite3 \
         --output-dir backups
+    python -m fake_review_detector.cli operational-check \
+        --data-dir data --backup-dir backups
 
 Invoking with a bare file path still works and runs ``score``, so the original
 one-argument usage is unchanged.
@@ -28,6 +30,7 @@ from .engine import moderate_batch
 from .errors import ModerationError, PolicyError, ValidationError
 from .evaluation import evaluate, load_labelled, threshold_sweep
 from .models import Action
+from .operations import run_operational_checks
 from .policy import Policy
 from .queue import Outcome, QueueState, ReviewQueue
 from .sqlite_store import SQLiteStore
@@ -336,6 +339,21 @@ def _cmd_backup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_operational_check(args: argparse.Namespace) -> int:
+    report = run_operational_checks(
+        readiness_url=args.readiness_url,
+        data_dir=args.data_dir,
+        backup_dir=args.backup_dir,
+        minimum_free_bytes=args.min_free_bytes,
+        minimum_free_percent=args.min_free_percent,
+        maximum_backup_age=args.max_backup_age,
+        readiness_timeout=args.readiness_timeout,
+        backup_timeout=args.backup_timeout,
+    )
+    print(json.dumps(report.to_dict(), ensure_ascii=True, separators=(",", ":")))
+    return 0 if report.ok else 1
+
+
 def _positive_int(raw: str) -> int:
     value = int(raw)
     if value < 1:
@@ -357,6 +375,16 @@ def _positive_float(raw: str) -> float:
         raise argparse.ArgumentTypeError("must be a number") from None
     if not 0 < value < float("inf"):
         raise argparse.ArgumentTypeError("must be finite and greater than zero")
+    return value
+
+
+def _percentage(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a number") from None
+    if not 0 <= value <= 100 or value in (float("inf"), float("-inf")):
+        raise argparse.ArgumentTypeError("must be between zero and 100")
     return value
 
 
@@ -517,6 +545,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite lock timeout in seconds (default: 30).",
     )
     backup_parser.set_defaults(func=_cmd_backup)
+
+    operations = subparsers.add_parser(
+        "operational-check",
+        help="Check local readiness, durable disk headroom, and verified backups.",
+    )
+    operations.add_argument(
+        "--readiness-url",
+        default="http://127.0.0.1:8000/readyz",
+        help="Local readiness URL (default: http://127.0.0.1:8000/readyz).",
+    )
+    operations.add_argument(
+        "--data-dir",
+        type=Path,
+        required=True,
+        help="Persistent application data directory whose filesystem is checked.",
+    )
+    operations.add_argument(
+        "--backup-dir",
+        type=Path,
+        required=True,
+        help="Directory containing finalized moderation backups.",
+    )
+    operations.add_argument(
+        "--min-free-bytes",
+        type=_nonnegative_int,
+        default=1_073_741_824,
+        help="Minimum data-filesystem free bytes (default: 1073741824).",
+    )
+    operations.add_argument(
+        "--min-free-percent",
+        type=_percentage,
+        default=10.0,
+        help="Minimum data-filesystem free percentage (default: 10).",
+    )
+    operations.add_argument(
+        "--max-backup-age",
+        type=_positive_float,
+        default=129_600.0,
+        help="Maximum latest-backup age in seconds (default: 129600 / 36h).",
+    )
+    operations.add_argument(
+        "--readiness-timeout",
+        type=_positive_float,
+        default=5.0,
+        help="Readiness request timeout in seconds (default: 5).",
+    )
+    operations.add_argument(
+        "--backup-timeout",
+        type=_positive_float,
+        default=30.0,
+        help="SQLite backup-verification lock timeout in seconds (default: 30).",
+    )
+    operations.set_defaults(func=_cmd_operational_check)
 
     #: Read back off the subparsers so the bare-path compatibility shim in
     #: main() cannot drift out of sync when a subcommand is added.

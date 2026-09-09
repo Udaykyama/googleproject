@@ -13,7 +13,8 @@ services:
       - --threads=${GUNICORN_THREADS:-4}
       - --timeout=60
       - --graceful-timeout=35
-      - --access-logfile=-
+      - --log-level=${LOG_LEVEL:-INFO}
+      - --logger-class=webui.gunicorn.SafeGunicornLogger
       - --error-logfile=-
       - --capture-output
       - webui:create_app()
@@ -23,6 +24,9 @@ services:
       SECRET_KEY: "${SECRET_KEY:?Set SECRET_KEY to a stable value of at least 32 characters}"
       LIVE_DNS: "${LIVE_DNS:-0}"
       TRUSTED_PROXY_HOPS: "1"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      LOG_CLIENT_ADDRESS: "${LOG_CLIENT_ADDRESS:-0}"
     ports:
       - name: http
         target: 8000

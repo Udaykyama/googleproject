@@ -21,6 +21,7 @@ import hmac
 import json
 import logging
 import secrets
+import time
 
 from flask import (
     Blueprint,
@@ -28,6 +29,7 @@ from flask import (
     abort,
     current_app,
     flash,
+    g,
     redirect,
     render_template,
     request,
@@ -41,12 +43,20 @@ from fake_review_detector.errors import AuditLogError, StorageError
 from .audits import MODE_LIVE, AuditProblem, AuditService
 from .config import AppConfig
 from .moderation import BatchProblem, DatabaseStore, ModerationService
+from .observability import (
+    configure_event_logger,
+    event,
+    request_id,
+    safe_client_address,
+    safe_exception_fields,
+)
 from .ratelimit import RateLimiter, SQLiteRateLimiter
 
 __all__ = ["create_app"]
 
 _CSRF_FIELD = "csrf_token"
 _CSRF_SESSION_KEY = "_csrf"
+_REQUEST_ID_HEADER = "X-Request-ID"
 
 #: No inline script or style anywhere, so the policy can stay strict. The UI
 #: uses <details> for expandable findings rather than JavaScript.
@@ -102,6 +112,31 @@ def _enforce_rate_limit() -> None:
     verdict = limiter.check(_client_id())
     if not verdict.allowed:
         abort(429, retry_after=verdict.retry_after)
+
+
+# -- request observability -----------------------------------------------
+
+
+def _start_request() -> None:
+    g.request_id = request_id(request.headers.get(_REQUEST_ID_HEADER))
+    if g.request_id is None:
+        g.request_id = secrets.token_hex(16)
+    g.request_started_ns = time.perf_counter_ns()
+
+
+def _request_fields(config: AppConfig) -> dict:
+    rule = request.url_rule.rule if request.url_rule is not None else "unmatched"
+    fields = {
+        "request_id": getattr(g, "request_id", None),
+        "method": request.method,
+        "route": rule,
+        "endpoint": request.endpoint or "unmatched",
+    }
+    if config.log_client_address:
+        client = safe_client_address(request)
+        if client is not None:
+            fields["client"] = client
+    return fields
 
 
 # -- routes --------------------------------------------------------------
@@ -327,6 +362,8 @@ def create_app(config: AppConfig | None = None) -> Flask:
         JSON_SORT_KEYS=False,
     )
     app.config["UI_CONFIG"] = config
+    event_logger = configure_event_logger(str(id(app)), config)
+    app.extensions["ui_event_logger"] = event_logger
 
     if config.trusted_proxy_hops:
         from werkzeug.middleware.proxy_fix import ProxyFix
@@ -354,6 +391,7 @@ def create_app(config: AppConfig | None = None) -> Flask:
         )
     )
 
+    app.before_request(_start_request)
     app.before_request(_check_csrf)
     app.register_blueprint(bp)
 
@@ -370,6 +408,29 @@ def create_app(config: AppConfig | None = None) -> Flask:
         # An audit reflects whatever the visitor submitted, including an
         # uploaded message. Nothing here should sit in a shared cache.
         response.headers.setdefault("Cache-Control", "no-store")
+        response.headers[_REQUEST_ID_HEADER] = g.request_id
+        started = getattr(g, "request_started_ns", time.perf_counter_ns())
+        fields = _request_fields(config)
+        fields.update(
+            status=response.status_code,
+            duration_ms=round(
+                max(0, time.perf_counter_ns() - started) / 1_000_000, 3
+            ),
+        )
+        level = (
+            logging.ERROR
+            if response.status_code >= 500
+            else logging.WARNING
+            if response.status_code >= 400
+            else logging.INFO
+        )
+        event(
+            event_logger,
+            level,
+            "http.request",
+            "request completed",
+            **fields,
+        )
         return response
 
     @app.errorhandler(HTTPException)
@@ -388,9 +449,17 @@ def create_app(config: AppConfig | None = None) -> Flask:
 
     @app.errorhandler(Exception)
     def _unexpected(exc: Exception):
-        # Log the traceback, show the visitor nothing: an audit's internals can
-        # include the domain and message they submitted.
-        app.logger.exception("unhandled error serving %s", request.path)
+        # Exception messages may contain submitted content. Record only its type
+        # and bounded module/function locations, never values or source paths.
+        fields = _request_fields(config)
+        fields.update(safe_exception_fields(exc))
+        event(
+            event_logger,
+            logging.ERROR,
+            "http.unhandled_error",
+            "request failed unexpectedly",
+            **fields,
+        )
         return (
             render_template(
                 "error.html",
@@ -404,7 +473,15 @@ def create_app(config: AppConfig | None = None) -> Flask:
     @app.errorhandler(StorageError)
     @app.errorhandler(AuditLogError)
     def _storage_error(exc):
-        app.logger.error("moderation storage failed", exc_info=True)
+        fields = _request_fields(config)
+        fields.update(safe_exception_fields(exc))
+        event(
+            event_logger,
+            logging.ERROR,
+            "storage.unavailable",
+            "moderation storage failed",
+            **fields,
+        )
         if request.path == "/readyz":
             return {"status": "unavailable"}, 503
         return (

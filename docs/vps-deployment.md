@@ -55,6 +55,9 @@ APP_PORT=8000
 GUNICORN_WORKERS=2
 GUNICORN_THREADS=4
 LIVE_DNS=0
+LOG_FORMAT=json
+LOG_LEVEL=INFO
+LOG_CLIENT_ADDRESS=0
 ```
 
 Keep this secret stable across restarts and deployments. Rotating it invalidates
@@ -76,8 +79,9 @@ The final image contains an installed wheel and packaged templates, CSS, demos,
 and sample data; it does not run from the source checkout. It runs as UID/GID
 10001 with a read-only root filesystem, all Linux capabilities dropped,
 `no-new-privileges`, a bounded PID count, a writable temporary tmpfs, rotated
-container logs, and graceful Gunicorn shutdown. The two original CLIs remain
-available:
+container logs, privacy-safe structured request events, and graceful Gunicorn
+shutdown. Gunicorn's raw access log is disabled because it includes unbounded
+request targets and query strings. The two original CLIs remain available:
 
 ```bash
 docker compose exec app inboxready --help
@@ -199,7 +203,117 @@ access-controlled off-host destination, with separate retention and restore
 tests. Choosing that destination is an operator decision; this repository does
 not add a vendor integration.
 
-## 4. Restore test and incident runbook
+## 4. Structured logs and operational checks
+
+The Compose deployment selects one-line JSON application logs. Each completed
+request includes a UTC timestamp, severity, stable event name, bounded request
+ID, method, normalized Flask route and endpoint, status, duration, and process
+ID. It never records the raw URL or query string, submitted mail/review bodies,
+form/session/CSRF values, or exception messages. Unexpected failures record an
+exception type and bounded module/function locations without source paths or
+local values. A dedicated Gunicorn logger also replaces parser errors with a
+fixed `gunicorn.invalid_request` event rather than echoing malformed request
+lines or headers.
+
+A caller-supplied `X-Request-ID` is reused only when it is 1-64 characters from
+the restricted ASCII token alphabet; all other values are replaced with a
+server-generated ID. The selected ID is returned in the response header. Use it
+to correlate a report with a request event:
+
+```bash
+curl -i -H 'X-Request-ID: operator-check-20260908' \
+  http://127.0.0.1:8000/readyz
+docker compose logs --since 15m --tail 500 --no-color app \
+  | grep --fixed-string '"request_id":"operator-check-20260908"'
+```
+
+Client address logging is off by default because IP addresses are personal
+data and are not the identity boundary. If an operator explicitly sets
+`LOG_CLIENT_ADDRESS=1`, the logger accepts only the single normalized IP in
+`remote_addr` after the declared `TRUSTED_PROXY_HOPS` processing. It never logs
+the raw `X-Forwarded-For` chain. Do not use the logged address as a substitute
+for tailnet membership or policy.
+
+Docker's `json-file` storage is bounded to five 10 MiB files. Inspect the
+current service, rotation configuration, application logs, and system logs
+without reading the database or uploads:
+
+```bash
+cd /opt/inboxready
+docker compose ps
+docker compose logs --since 1h --tail 500 --no-color app
+APP_CONTAINER=$(docker compose ps -q app)
+docker inspect --format '{{json .HostConfig.LogConfig}}' "$APP_CONTAINER"
+sudo journalctl \
+  -u inboxready-backup.service \
+  -u inboxready-operational-check.service \
+  --since today --no-pager
+```
+
+The dependency-free `operational-check` command emits one JSON document and
+exits zero only when all four conditions hold:
+
+- the app's local `/readyz` response is ready before its timeout;
+- the persistent data filesystem has at least 1 GiB **and** 10% free;
+- the latest finalized backup is no more than 36 hours old; and
+- that backup passes the same full SQLite and audit-anchor verification used
+  before backup publication.
+
+It reports stable cause codes such as `readiness_timeout`, `disk_space_low`,
+`backup_stale`, and `backup_integrity_failed`, never paths or response bodies.
+It does not delete or repair anything. The supplied service runs the check in a
+temporary container so it can still report a stopped or unreachable app while
+using the production image and read-only check logic. Its systemd path check is
+an assertion, so a missing deployment checkout fails and reaches `OnFailure`
+rather than silently skipping monitoring.
+
+After the first manual verified backup exists, install the six-hour timer:
+
+```bash
+sudo install -m 0644 deploy/systemd/inboxready-operational-check.service \
+  /etc/systemd/system/inboxready-operational-check.service
+sudo install -m 0644 deploy/systemd/inboxready-operational-check.timer \
+  /etc/systemd/system/inboxready-operational-check.timer
+sudo systemctl daemon-reload
+sudo systemctl start inboxready-operational-check.service
+sudo journalctl -u inboxready-operational-check.service -n 20 -o cat --no-pager
+sudo systemctl enable --now inboxready-operational-check.timer
+systemctl list-timers inboxready-operational-check.timer
+```
+
+The timer runs at most four times per day, starts 15 minutes after boot, and
+adds up to 15 minutes of jitter. Adjust the free-space and backup-age arguments
+in the installed service to match the provisioned disk and recovery objective;
+keep both nonzero in production and run `systemctl daemon-reload` after edits.
+
+Paging delivery remains an operator choice. Once an operator-owned executable
+at `/usr/local/sbin/inboxready-notify` accepts a failed unit name and has been
+tested with its credentials stored outside this repository, the supplied
+vendor-neutral template can be installed:
+
+```bash
+sudo install -m 0644 deploy/systemd/inboxready-alert@.service.example \
+  /etc/systemd/system/inboxready-alert@.service
+sudo systemctl edit inboxready-operational-check.service
+```
+
+Add this drop-in, then reload systemd:
+
+```ini
+[Unit]
+OnFailure=inboxready-alert@%p.service
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start inboxready-alert@inboxready-operational-check.service
+```
+
+The repository deliberately does not choose a pager, webhook, credentials, or
+delivery policy. The six-hour cadence bounds repeated notifications, but the
+operator notifier should also deduplicate and route according to local policy.
+
+## 5. Verified restore drill
 
 Test this procedure periodically on a disposable host. The automated test suite
 also restores a produced backup into a fresh path and verifies its anchor and
@@ -260,12 +374,18 @@ counts are confirmed. If validation fails, stop the app and move that preserved
 set back as a unit; do not combine a database file with WAL/SHM files from a
 different snapshot.
 
+For diagnosis and response procedures covering readiness, crash loops, disk,
+backups, SQLite, Tailscale, rollback, evidence collection, and escalation, use
+the [incident operations runbook](incident-operations.md).
+
 ## Operating boundaries
 
 - `STORAGE=sqlite` does not import, overwrite, or delete legacy JSON queue/audit
   files. Migration requires a separately designed and tested procedure.
 - `/healthz` proves the process responds. `/readyz` also checks that SQLite and
   its audit anchor are accessible; use readiness for deployment decisions.
+- The operational check is local and timer-driven. There is intentionally no
+  public metrics endpoint and no per-worker in-memory counter surface.
 - `LIVE_DNS=0` is the default. If enabled, every authorized tailnet member with
   access can ask the service to query arbitrary domains. Query budgets,
   deadlines, bounded worker admission, and shared SQLite token buckets reduce

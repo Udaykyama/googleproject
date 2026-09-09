@@ -36,8 +36,8 @@ guarantee into an ephemeral deployment.
 
 from __future__ import annotations
 
-import os
 import math
+import os
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +49,8 @@ MEMORY = "memory"
 FILE = "file"
 SQLITE = "sqlite"
 _MIN_SQLITE_SECRET_LENGTH = 32
+_LOG_FORMATS = frozenset({"text", "json"})
+_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
 #: Where the repository's demo assets live when running from a checkout.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -107,6 +109,25 @@ def _positive_float(env: Mapping[str, str], name: str, default: float) -> float:
     return value
 
 
+def _choice(
+    env: Mapping[str, str],
+    name: str,
+    default: str,
+    choices: frozenset[str],
+    *,
+    uppercase: bool = False,
+) -> str:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    value = raw.strip()
+    value = value.upper() if uppercase else value.lower()
+    if value not in choices:
+        allowed = ", ".join(sorted(choices))
+        raise ConfigError(f"{name} must be one of {allowed}, got {raw!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Resolved settings for one running instance."""
@@ -141,6 +162,13 @@ class AppConfig:
     audit_workers: int = 4
     queue_page_size: int = 50
     sqlite_timeout: float = 5.0
+    #: Development stays human-readable. The Compose deployment explicitly
+    #: selects JSON so each worker emits parseable, correlation-friendly events.
+    log_format: str = "text"
+    log_level: str = "INFO"
+    #: Client IPs are personal data. When enabled, only the single normalized
+    #: ``remote_addr`` selected by the declared proxy trust is recorded.
+    log_client_address: bool = False
 
     def __post_init__(self) -> None:
         if self.storage not in {MEMORY, FILE, SQLITE}:
@@ -176,6 +204,16 @@ class AppConfig:
             or self.trusted_proxy_hops < 0
         ):
             raise ConfigError("TRUSTED_PROXY_HOPS must be a non-negative integer")
+        if self.log_format not in _LOG_FORMATS:
+            raise ConfigError(
+                f"LOG_FORMAT must be one of {', '.join(sorted(_LOG_FORMATS))}"
+            )
+        if self.log_level not in _LOG_LEVELS:
+            raise ConfigError(
+                f"LOG_LEVEL must be one of {', '.join(sorted(_LOG_LEVELS))}"
+            )
+        if not isinstance(self.log_client_address, bool):
+            raise ConfigError("LOG_CLIENT_ADDRESS must be a boolean")
 
     @property
     def persistent(self) -> bool:
@@ -281,4 +319,15 @@ class AppConfig:
             audit_workers=_bounded_int(env, "AUDIT_WORKERS", cls.audit_workers),
             queue_page_size=_bounded_int(env, "QUEUE_PAGE_SIZE", cls.queue_page_size),
             sqlite_timeout=_positive_float(env, "SQLITE_TIMEOUT", cls.sqlite_timeout),
+            log_format=_choice(
+                env, "LOG_FORMAT", cls.log_format, _LOG_FORMATS
+            ),
+            log_level=_choice(
+                env,
+                "LOG_LEVEL",
+                cls.log_level,
+                _LOG_LEVELS,
+                uppercase=True,
+            ),
+            log_client_address=_flag(env, "LOG_CLIENT_ADDRESS", False),
         )

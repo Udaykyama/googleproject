@@ -65,4 +65,4 @@ USER 10001:10001
 EXPOSE 8000
 STOPSIGNAL SIGTERM
 
-CMD ["gunicorn", "--bind=0.0.0.0:8000", "--workers=2", "--threads=4", "--timeout=60", "--graceful-timeout=35", "--access-logfile=-", "--error-logfile=-", "--capture-output", "webui:create_app()"]
+CMD ["gunicorn", "--bind=0.0.0.0:8000", "--workers=2", "--threads=4", "--timeout=60", "--graceful-timeout=35", "--log-level=info", "--logger-class=webui.gunicorn.SafeGunicornLogger", "--error-logfile=-", "--capture-output", "webui:create_app()"]

@@ -14,10 +14,16 @@ from pathlib import Path
 from .errors import AuditLogError, BackupError, StorageError
 from .sqlite_store import SQLiteStore
 
-__all__ = ["BackupResult", "backup_database"]
+__all__ = [
+    "BackupResult",
+    "BackupSnapshot",
+    "backup_database",
+    "latest_backup",
+    "verify_backup",
+]
 
 _BACKUP_NAME = re.compile(
-    r"^moderation-\d{8}T\d{6}\.\d{6}Z\.sqlite3$"
+    r"^moderation-(?P<timestamp>\d{8}T\d{6}\.\d{6}Z)\.sqlite3$"
 )
 
 
@@ -28,6 +34,14 @@ class BackupResult:
     path: Path
     records: int
     removed: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class BackupSnapshot:
+    """A finalized backup and the UTC timestamp encoded in its name."""
+
+    path: Path
+    created_at: datetime
 
 
 def _filename(now: datetime | None = None) -> str:
@@ -69,6 +83,27 @@ def _verify_audit_chain(path: Path, timeout: float) -> int:
     return status.records
 
 
+def verify_backup(database: str | Path, *, timeout: float = 30.0) -> int:
+    """Run the same integrity and audit verification used before publication."""
+
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not 0 < timeout < float("inf")
+    ):
+        raise BackupError("backup verification timeout must be finite and positive")
+    try:
+        candidate = Path(database).expanduser()
+        is_symlink = candidate.is_symlink()
+        path = candidate.resolve()
+        exists = path.is_file() and not is_symlink
+    except (OSError, RuntimeError) as exc:
+        raise BackupError(f"cannot resolve backup path: {exc}") from exc
+    if not exists:
+        raise BackupError(f"backup does not exist or is not a regular file: {path}")
+    return _verify_audit_chain(path, float(timeout))
+
+
 def _remove_partial(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)
@@ -85,25 +120,58 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
-def _prune(directory: Path, keep: int, current: Path) -> tuple[Path, ...]:
+def _backup_timestamp(name: str) -> datetime | None:
+    match = _BACKUP_NAME.fullmatch(name)
+    if match is None:
+        return None
     try:
-        candidates = sorted(
+        parsed = datetime.strptime(
+            match.group("timestamp"), "%Y%m%dT%H%M%S.%fZ"
+        )
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc)
+
+
+def _backup_candidates(directory: Path) -> list[BackupSnapshot]:
+    try:
+        return sorted(
             (
-                path
+                BackupSnapshot(path=path, created_at=created_at)
                 for path in directory.iterdir()
-                if _BACKUP_NAME.fullmatch(path.name)
+                if (created_at := _backup_timestamp(path.name)) is not None
                 and path.is_file()
                 and not path.is_symlink()
             ),
-            key=lambda path: path.name,
+            key=lambda backup: backup.path.name,
             reverse=True,
         )
     except OSError as exc:
         raise BackupError(f"cannot list backup directory {directory}: {exc}") from exc
 
-    if current not in candidates:
+
+def latest_backup(output_dir: str | Path) -> BackupSnapshot | None:
+    """Return the newest finalized backup without accepting partials or links."""
+
+    try:
+        directory = Path(output_dir).expanduser().resolve()
+        exists = directory.is_dir()
+    except (OSError, RuntimeError) as exc:
+        raise BackupError(f"cannot resolve backup directory: {exc}") from exc
+    if not exists:
+        raise BackupError(f"backup directory does not exist: {directory}")
+    candidates = _backup_candidates(directory)
+    return candidates[0] if candidates else None
+
+
+def _prune(directory: Path, keep: int, current: Path) -> tuple[Path, ...]:
+    candidates = _backup_candidates(directory)
+    current_backup = next(
+        (backup for backup in candidates if backup.path == current), None
+    )
+    if current_backup is None:
         raise BackupError(f"newly published backup is missing: {current}")
-    previous = [path for path in candidates if path != current]
+    previous = [backup.path for backup in candidates if backup.path != current]
     expired = previous[max(keep - 1, 0):]
     removed = []
     for path in expired:

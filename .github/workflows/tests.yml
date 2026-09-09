@@ -257,6 +257,9 @@ jobs:
           GUNICORN_WORKERS=2
           GUNICORN_THREADS=2
           LIVE_DNS=0
+          LOG_FORMAT=json
+          LOG_LEVEL=INFO
+          LOG_CLIENT_ADDRESS=0
           EOF
 
       - name: Render the production Compose model
@@ -264,9 +267,22 @@ jobs:
           docker compose --env-file /tmp/inboxready.env config --quiet
           docker compose --env-file /tmp/inboxready.env config \
             > /tmp/inboxready-compose.yaml
+          docker compose --env-file /tmp/inboxready.env config --format json \
+            > /tmp/inboxready-compose.json
           grep -q "host_ip: 127.0.0.1" /tmp/inboxready-compose.yaml
           grep -q "read_only: true" /tmp/inboxready-compose.yaml
           grep -q "no-new-privileges:true" /tmp/inboxready-compose.yaml
+          python - <<'PY'
+          import json
+          service = json.load(open("/tmp/inboxready-compose.json"))["services"]["app"]
+          assert service["logging"]["driver"] == "json-file", service["logging"]
+          assert service["logging"]["options"] == {
+              "max-file": "5", "max-size": "10m"
+          }, service["logging"]
+          assert not any("--access-logfile" in item for item in service["command"])
+          assert "--logger-class=webui.gunicorn.SafeGunicornLogger" in service["command"]
+          print("bounded logging model rendered")
+          PY
 
       - name: Build the production image
         run: docker compose --env-file /tmp/inboxready.env build --pull
@@ -286,7 +302,37 @@ jobs:
       - name: Start and back up the hardened service
         run: |
           docker compose --env-file /tmp/inboxready.env up -d --wait
-          curl -fsS http://127.0.0.1:8000/readyz
+          curl -fsS -D /tmp/ready-headers \
+            -H 'X-Request-ID: ci-ready-check' \
+            'http://127.0.0.1:8000/readyz?private-marker=must-not-log' \
+            > /tmp/ready-body
+          grep -qi '^X-Request-ID: ci-ready-check' /tmp/ready-headers
+          python - <<'PY'
+          import socket
+          import time
+          with socket.create_connection(("127.0.0.1", 8000), timeout=3) as client:
+              client.sendall(
+                  b"GET /parser-query-marker?token=parser-secret HTTP/1.1\r\n"
+                  b"Host: localhost\r\n"
+                  b"X-Invalid: header-marker\x00\r\n"
+                  b"Connection: close\r\n\r\n"
+              )
+              response = client.recv(1024)
+          assert b" 400 " in response.splitlines()[0], response
+          time.sleep(0.1)
+          PY
+          docker compose --env-file /tmp/inboxready.env logs --no-color app \
+            > /tmp/inboxready-app.log
+          grep -q '"event":"http.request"' /tmp/inboxready-app.log
+          grep -q '"request_id":"ci-ready-check"' /tmp/inboxready-app.log
+          grep -q '"route":"/readyz"' /tmp/inboxready-app.log
+          grep -q '"event":"gunicorn.invalid_request"' /tmp/inboxready-app.log
+          for marker in must-not-log parser-query-marker parser-secret header-marker; do
+            if grep -q "$marker" /tmp/inboxready-app.log; then
+              echo "::error::request-derived content reached production logs"
+              exit 1
+            fi
+          done
           docker compose --env-file /tmp/inboxready.env exec -T app \
             fake-review-detector backup \
               --database /var/lib/inboxready/moderation.sqlite3 \
@@ -299,6 +345,27 @@ jobs:
             fake-review-detector verify \
               --database "/var/backups/inboxready/$(basename "$backup")" \
               --integrity --require-anchor
+          docker compose --env-file /tmp/inboxready.env run --rm --no-deps -T app \
+            fake-review-detector operational-check \
+              --readiness-url http://app:8000/readyz \
+              --data-dir /var/lib/inboxready \
+              --backup-dir /var/backups/inboxready \
+              --min-free-bytes 0 \
+              --min-free-percent 0 \
+              --max-backup-age 86400 \
+              > /tmp/inboxready-operations.json
+          python - <<'PY'
+          import json
+          payload = json.load(open("/tmp/inboxready-operations.json"))
+          assert payload["status"] == "ok", payload
+          assert [item["code"] for item in payload["checks"]] == [
+              "ready",
+              "disk_space_available",
+              "backup_recent",
+              "backup_verified",
+          ], payload
+          print("operational check passed")
+          PY
 
       - name: Stop the deployment
         if: always()

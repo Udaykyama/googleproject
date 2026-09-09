@@ -17,7 +17,13 @@ the original scoring-only API.
 """
 
 from .audit import AuditLog, replay
-from .backup import BackupResult, backup_database
+from .backup import (
+    BackupResult,
+    BackupSnapshot,
+    backup_database,
+    latest_backup,
+    verify_backup,
+)
 from .detector import score_review, score_reviews
 from .engine import BatchResult, moderate, moderate_batch, score_batch
 from .errors import (
@@ -71,6 +77,9 @@ __all__ = [
     "replay",
     "backup_database",
     "BackupResult",
+    "BackupSnapshot",
+    "latest_backup",
+    "verify_backup",
     # Measurement
     "evaluate",
     "threshold_sweep",
