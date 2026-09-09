@@ -25,9 +25,9 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -57,9 +57,9 @@ jobs:
     # which is where README drift shows up first.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -129,9 +129,9 @@ jobs:
     # deployment is caught here rather than after it is deployed.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -229,17 +229,117 @@ jobs:
           if [ -f /tmp/webui.pid ]; then kill "$(cat /tmp/webui.pid)" || true; fi
           cat /tmp/webui.log || true
 
+  infrastructure-validation:
+    # Validation downloads the locked provider and creates an offline plan
+    # with a fake token, but uses no backend, real credential, or apply.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.12.6
+
+      - name: Check formatting and validate without credentials
+        run: |
+          tofu fmt -check -recursive infrastructure
+          tofu -chdir=infrastructure/digitalocean init \
+            -backend=false -input=false -lockfile=readonly
+          tofu -chdir=infrastructure/digitalocean validate -no-color
+
+      - name: Exercise the no-credential plan and firewall invariants
+        env:
+          DIGITALOCEAN_TOKEN: ci-placeholder-not-a-real-token
+        run: |
+          set -euo pipefail
+          trap 'rm -f /tmp/inboxready.tfplan /tmp/inboxready-plan.json /tmp/no-public-ssh.tfplan /tmp/no-public-ssh.json /tmp/unsafe-plan.txt' EXIT
+          tofu -chdir=infrastructure/digitalocean plan \
+            -refresh=false -lock=false -input=false -no-color \
+            -out=/tmp/inboxready.tfplan \
+            -var='confirm_billable_resources=true' \
+            -var='ssh_key_ids_or_fingerprints=["12345"]' \
+            -var='operator_ssh_cidrs=["8.8.8.8/32"]' \
+            > /dev/null
+          tofu -chdir=infrastructure/digitalocean show \
+            -json /tmp/inboxready.tfplan > /tmp/inboxready-plan.json
+          python3 - <<'PY'
+          import json
+
+          plan = json.load(open("/tmp/inboxready-plan.json"))
+          resources = {
+              resource["address"]: resource["values"]
+              for resource in plan["planned_values"]["root_module"]["resources"]
+          }
+          assert set(resources) == {
+              "digitalocean_droplet.app",
+              "digitalocean_firewall.app",
+              "digitalocean_project.app",
+              "digitalocean_tag.app",
+          }, resources
+          droplet = resources["digitalocean_droplet.app"]
+          assert droplet["image"] == "ubuntu-24-04-x64", droplet
+          assert droplet["backups"] is True, droplet
+          assert droplet["monitoring"] is True, droplet
+          assert droplet["ipv6"] is False, droplet
+          firewall = resources["digitalocean_firewall.app"]
+          inbound = firewall["inbound_rule"]
+          assert len(inbound) == 1, inbound
+          assert inbound[0]["protocol"] == "tcp", inbound
+          assert inbound[0]["port_range"] == "22", inbound
+          assert inbound[0]["source_addresses"] == [
+              "8.8.8.8/32"
+          ], inbound
+          assert not {"80", "443", "8000"} & {
+              rule.get("port_range") for rule in inbound
+          }, inbound
+          print("offline infrastructure plan invariants passed")
+          PY
+          if tofu -chdir=infrastructure/digitalocean plan \
+            -refresh=false -lock=false -input=false -no-color \
+            -var='confirm_billable_resources=true' \
+            -var='ssh_key_ids_or_fingerprints=["12345"]' \
+            -var='operator_ssh_cidrs=["0.0.0.0/0"]' \
+            > /tmp/unsafe-plan.txt 2>&1; then
+            echo "::error::unsafe public SSH CIDR unexpectedly passed planning"
+            exit 1
+          fi
+          grep -q "operator_ssh_cidrs must contain IPv4 /24-/32" \
+            /tmp/unsafe-plan.txt
+          tofu -chdir=infrastructure/digitalocean plan \
+            -refresh=false -lock=false -input=false -no-color \
+            -out=/tmp/no-public-ssh.tfplan \
+            -var='confirm_billable_resources=true' \
+            -var='ssh_key_ids_or_fingerprints=["12345"]' \
+            -var='disable_public_ssh=true' \
+            -var='operator_ssh_cidrs=[]' \
+            > /dev/null
+          tofu -chdir=infrastructure/digitalocean show \
+            -json /tmp/no-public-ssh.tfplan > /tmp/no-public-ssh.json
+          python3 - <<'PY'
+          import json
+
+          plan = json.load(open("/tmp/no-public-ssh.json"))
+          resources = {
+              resource["address"]: resource["values"]
+              for resource in plan["planned_values"]["root_module"]["resources"]
+          }
+          assert resources["digitalocean_firewall.app"]["inbound_rule"] == []
+          print("post-bootstrap public SSH removal passed")
+          PY
+
   deployment-smoke:
     # Exercise the same image, Compose file, hardening, readiness, and backup
     # command an operator will use on a fresh VPS.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Required production settings must fail closed
         run: |
-          if env -u SECRET_KEY -u APP_DATA_DIR -u BACKUP_DIR \
-              docker compose config --quiet; then
+          if env -u APP_IMAGE -u SECRET_KEY -u APP_DATA_DIR -u BACKUP_DIR \
+              docker compose --project-name inboxready \
+                --file compose.yaml config --quiet; then
             echo "::error::Compose accepted missing production settings"
             exit 1
           fi
@@ -248,8 +348,9 @@ jobs:
         run: |
           sudo install -d -o 10001 -g 10001 -m 0700 \
             /tmp/inboxready-data /tmp/inboxready-backups
-          install -m 0600 /dev/null /tmp/inboxready.env
-          cat > /tmp/inboxready.env <<'EOF'
+          install -m 0600 /dev/null /tmp/inboxready-production.env
+          cat > /tmp/inboxready-production.env <<'EOF'
+          APP_IMAGE=ghcr.io/udaykyama/googleproject@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           APP_DATA_DIR=/tmp/inboxready-data
           BACKUP_DIR=/tmp/inboxready-backups
           SECRET_KEY=ci-deployment-smoke-only-not-a-production-secret
@@ -261,13 +362,26 @@ jobs:
           LOG_LEVEL=INFO
           LOG_CLIENT_ADDRESS=0
           EOF
+          cp /tmp/inboxready-production.env /tmp/inboxready-local.env
+          sed -i \
+            's|^APP_IMAGE=.*|APP_IMAGE=inboxready:local|' \
+            /tmp/inboxready-local.env
 
       - name: Render the production Compose model
         run: |
-          docker compose --env-file /tmp/inboxready.env config --quiet
-          docker compose --env-file /tmp/inboxready.env config \
+          APP_IMAGE=ghcr.io/udaykyama/googleproject:mutable \
+          APP_DATA_DIR=/tmp/untrusted-data \
+          BACKUP_DIR=/tmp/untrusted-backups \
+          SECRET_KEY=untrusted-exported-secret \
+          COMPOSE_FILE=compose.local.yaml \
+          COMPOSE_PROJECT_NAME=untrusted-project \
+            deploy/production-compose \
+              --env-file /tmp/inboxready-production.env config
+          docker compose --project-name inboxready --file compose.yaml \
+            --env-file /tmp/inboxready-production.env config \
             > /tmp/inboxready-compose.yaml
-          docker compose --env-file /tmp/inboxready.env config --format json \
+          docker compose --project-name inboxready --file compose.yaml \
+            --env-file /tmp/inboxready-production.env config --format json \
             > /tmp/inboxready-compose.json
           grep -q "host_ip: 127.0.0.1" /tmp/inboxready-compose.yaml
           grep -q "read_only: true" /tmp/inboxready-compose.yaml
@@ -275,6 +389,10 @@ jobs:
           python - <<'PY'
           import json
           service = json.load(open("/tmp/inboxready-compose.json"))["services"]["app"]
+          assert service["image"].startswith(
+              "ghcr.io/udaykyama/googleproject@sha256:"
+          ), service["image"]
+          assert "build" not in service, service
           assert service["logging"]["driver"] == "json-file", service["logging"]
           assert service["logging"]["options"] == {
               "max-file": "5", "max-size": "10m"
@@ -285,7 +403,10 @@ jobs:
           PY
 
       - name: Build the production image
-        run: docker compose --env-file /tmp/inboxready.env build --pull
+        run: |
+          docker compose --project-name inboxready \
+            -f compose.yaml -f compose.local.yaml \
+            --env-file /tmp/inboxready-local.env build --pull
 
       - name: Image must be installed, non-root, and keep both CLIs
         run: |
@@ -301,7 +422,9 @@ jobs:
 
       - name: Start and back up the hardened service
         run: |
-          docker compose --env-file /tmp/inboxready.env up -d --wait
+          docker compose --project-name inboxready \
+            -f compose.yaml -f compose.local.yaml \
+            --env-file /tmp/inboxready-local.env up -d --wait
           curl -fsS -D /tmp/ready-headers \
             -H 'X-Request-ID: ci-ready-check' \
             'http://127.0.0.1:8000/readyz?private-marker=must-not-log' \
@@ -321,7 +444,9 @@ jobs:
           assert b" 400 " in response.splitlines()[0], response
           time.sleep(0.1)
           PY
-          docker compose --env-file /tmp/inboxready.env logs --no-color app \
+          docker compose --project-name inboxready \
+            -f compose.yaml -f compose.local.yaml \
+            --env-file /tmp/inboxready-local.env logs --no-color app \
             > /tmp/inboxready-app.log
           grep -q '"event":"http.request"' /tmp/inboxready-app.log
           grep -q '"request_id":"ci-ready-check"' /tmp/inboxready-app.log
@@ -333,7 +458,9 @@ jobs:
               exit 1
             fi
           done
-          docker compose --env-file /tmp/inboxready.env exec -T app \
+          docker compose --project-name inboxready \
+            -f compose.yaml -f compose.local.yaml \
+            --env-file /tmp/inboxready-local.env exec -T app \
             fake-review-detector backup \
               --database /var/lib/inboxready/moderation.sqlite3 \
               --output-dir /var/backups/inboxready \
@@ -341,11 +468,16 @@ jobs:
           backup=$(sudo find /tmp/inboxready-backups -maxdepth 1 -type f \
             -name 'moderation-*.sqlite3' -print -quit)
           test -n "$backup"
-          docker compose --env-file /tmp/inboxready.env exec -T app \
+          docker compose --project-name inboxready \
+            -f compose.yaml -f compose.local.yaml \
+            --env-file /tmp/inboxready-local.env exec -T app \
             fake-review-detector verify \
               --database "/var/backups/inboxready/$(basename "$backup")" \
               --integrity --require-anchor
-          docker compose --env-file /tmp/inboxready.env run --rm --no-deps -T app \
+          docker compose --project-name inboxready \
+            -f compose.yaml -f compose.local.yaml \
+            --env-file /tmp/inboxready-local.env \
+            run --rm --no-deps -T app \
             fake-review-detector operational-check \
               --readiness-url http://app:8000/readyz \
               --data-dir /var/lib/inboxready \
@@ -370,5 +502,9 @@ jobs:
       - name: Stop the deployment
         if: always()
         run: |
-          docker compose --env-file /tmp/inboxready.env logs || true
-          docker compose --env-file /tmp/inboxready.env down || true
+          docker compose --project-name inboxready \
+            -f compose.yaml -f compose.local.yaml \
+            --env-file /tmp/inboxready-local.env logs || true
+          docker compose --project-name inboxready \
+            -f compose.yaml -f compose.local.yaml \
+            --env-file /tmp/inboxready-local.env down || true

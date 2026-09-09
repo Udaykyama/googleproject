@@ -2,10 +2,7 @@ name: inboxready
 
 services:
   app:
-    image: inboxready:local
-    build:
-      context: .
-      target: runtime
+    image: "${APP_IMAGE:?Set APP_IMAGE to an approved immutable image digest}"
     command:
       - gunicorn
       - --bind=0.0.0.0:8000

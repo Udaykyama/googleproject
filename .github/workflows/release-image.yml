@@ -1,0 +1,244 @@
+name: release image
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing signed annotated vMAJOR.MINOR.PATCH tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-image-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/udaykyama/googleproject
+
+jobs:
+  verify:
+    name: Verify signed release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
+      created: ${{ steps.release.outputs.created }}
+      tag: ${{ steps.release.outputs.tag }}
+
+    steps:
+      - name: Check out the signed release
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+
+      - name: Verify tag, signature, and package version
+        id: release
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" &&
+                "$WORKFLOW_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo "::error::manual releases must dispatch the workflow from $DEFAULT_BRANCH"
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release tag must be exactly vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" != "tag" ]]; then
+            echo "::error::$RELEASE_TAG must be an annotated tag, not a lightweight tag"
+            exit 1
+          fi
+
+          tag_object_sha=$(git rev-parse "refs/tags/$RELEASE_TAG^{tag}")
+          commit_sha=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          if [[ "$EVENT_NAME" == "push" &&
+                "$EVENT_SHA" != "$tag_object_sha" &&
+                "$EVENT_SHA" != "$commit_sha" ]]; then
+            echo "::error::$RELEASE_TAG moved after this release event"
+            exit 1
+          fi
+          git checkout --detach "$commit_sha"
+          if [[ "$(git rev-parse HEAD)" != "$commit_sha" ]]; then
+            echo "::error::checked-out source does not match $RELEASE_TAG"
+            exit 1
+          fi
+          git fetch --no-tags --force origin \
+            "refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor \
+            "$commit_sha" "refs/remotes/origin/$DEFAULT_BRANCH"; then
+            echo "::error::$RELEASE_TAG must point to a commit on $DEFAULT_BRANCH"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" \
+            > "$RUNNER_TEMP/release-tag.json"
+
+          TAG_JSON="$RUNNER_TEMP/release-tag.json" \
+          RELEASE_TAG="$RELEASE_TAG" \
+          COMMIT_SHA="$commit_sha" \
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+          import tomllib
+
+          tag = os.environ["RELEASE_TAG"]
+          commit = os.environ["COMMIT_SHA"]
+          payload = json.loads(pathlib.Path(os.environ["TAG_JSON"]).read_text())
+          if payload.get("tag") != tag or payload.get("object", {}).get("sha") != commit:
+              sys.exit("GitHub tag metadata does not match the checked-out commit")
+          verification = payload.get("verification", {})
+          if verification.get("verified") is not True:
+              reason = verification.get("reason", "unknown")
+              sys.exit(f"GitHub did not verify the tag signature: {reason}")
+
+          project_version = tomllib.loads(
+              pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          )["project"]["version"]
+          if tag != f"v{project_version}":
+              sys.exit(
+                  f"release tag {tag} does not match pyproject.toml version "
+                  f"{project_version}"
+              )
+          PY
+
+          created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          {
+            echo "tag=$RELEASE_TAG"
+            echo "commit_sha=$commit_sha"
+            echo "created=$created"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish verified release image
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.record.outputs.image }}
+
+    steps:
+      - name: Check out the verified release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          ref: ${{ needs.verify.outputs.commit_sha }}
+
+      - name: Bind the build context to the verified commit
+        env:
+          COMMIT_SHA: ${{ needs.verify.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$COMMIT_SHA"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Refuse to overwrite release tags
+        env:
+          COMMIT_SHA: ${{ needs.verify.outputs.commit_sha }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for tag in "sha-$COMMIT_SHA" "$RELEASE_TAG"; do
+            ref="$IMAGE_NAME:$tag"
+            if output=$(docker buildx imagetools inspect "$ref" 2>&1); then
+              echo "::error::$ref already exists; release tags are never overwritten"
+              exit 1
+            fi
+            case "$output" in
+              *"manifest unknown"*|*"$ref: not found"*) ;;
+              *)
+                echo "::error::could not safely establish that $ref is unused"
+                printf '%s\n' "$output" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=sha-${{ needs.verify.outputs.commit_sha }}
+            type=raw,value=${{ needs.verify.outputs.tag }}
+          labels: |
+            org.opencontainers.image.title=InboxReady
+            org.opencontainers.image.description=Private single-host InboxReady application
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.verify.outputs.commit_sha }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.tag }}
+            org.opencontainers.image.created=${{ needs.verify.outputs.created }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and publish the production image
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: ./Dockerfile
+          # The initial DigitalOcean target is amd64. Avoiding emulation keeps
+          # release builds simpler and more reliable until arm64 is required.
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=production-image
+          cache-to: type=gha,mode=max,scope=production-image
+          provenance: mode=max
+          sbom: true
+
+      - name: Record the immutable deployment reference
+        id: record
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          COMMIT_SHA: ${{ needs.verify.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Buildx returned an invalid image digest: $DIGEST"
+            exit 1
+          fi
+          immutable_ref="$IMAGE_NAME@$DIGEST"
+          echo "image=$immutable_ref" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Immutable image::$immutable_ref"
+          {
+            echo "## Released container image"
+            echo
+            echo "- Approved deployment reference: \`$immutable_ref\`"
+            echo "- Semantic tag: \`$IMAGE_NAME:$RELEASE_TAG\`"
+            echo "- Commit tag: \`$IMAGE_NAME:sha-$COMMIT_SHA\`"
+            echo "- Release commit: \`$COMMIT_SHA\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- BuildKit provenance and SBOM attestations: enabled"
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$immutable_ref"

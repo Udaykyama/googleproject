@@ -7,7 +7,9 @@ ConditionPathExists=/opt/inboxready/compose.yaml
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/inboxready
-ExecStart=/usr/bin/docker compose exec -T app fake-review-detector backup --database /var/lib/inboxready/moderation.sqlite3 --output-dir /var/backups/inboxready --keep 14
+UnsetEnvironment=APP_IMAGE APP_DATA_DIR BACKUP_DIR SECRET_KEY APP_PORT GUNICORN_WORKERS GUNICORN_THREADS LIVE_DNS LOG_FORMAT LOG_LEVEL LOG_CLIENT_ADDRESS COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE COMPOSE_PATH_SEPARATOR
+ExecStartPre=/opt/inboxready/deploy/production-compose --env-file /etc/inboxready/app.env config
+ExecStart=/usr/bin/docker compose --project-name inboxready --file /opt/inboxready/compose.yaml --env-file /etc/inboxready/app.env exec -T app fake-review-detector backup --database /var/lib/inboxready/moderation.sqlite3 --output-dir /var/backups/inboxready --keep 14
 TimeoutStartSec=45min
 Nice=10
 IOSchedulingClass=idle

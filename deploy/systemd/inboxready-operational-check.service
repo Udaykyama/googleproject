@@ -7,7 +7,9 @@ AssertPathExists=/opt/inboxready/compose.yaml
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/inboxready
-ExecStart=/usr/bin/docker compose run --rm --no-deps -T app fake-review-detector operational-check --readiness-url http://app:8000/readyz --data-dir /var/lib/inboxready --backup-dir /var/backups/inboxready --min-free-bytes 1073741824 --min-free-percent 10 --max-backup-age 129600 --readiness-timeout 5 --backup-timeout 30
+UnsetEnvironment=APP_IMAGE APP_DATA_DIR BACKUP_DIR SECRET_KEY APP_PORT GUNICORN_WORKERS GUNICORN_THREADS LIVE_DNS LOG_FORMAT LOG_LEVEL LOG_CLIENT_ADDRESS COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE COMPOSE_PATH_SEPARATOR
+ExecStartPre=/opt/inboxready/deploy/production-compose --env-file /etc/inboxready/app.env config
+ExecStart=/usr/bin/docker compose --project-name inboxready --file /opt/inboxready/compose.yaml --env-file /etc/inboxready/app.env run --pull never --rm --no-deps -T app fake-review-detector operational-check --readiness-url http://app:8000/readyz --data-dir /var/lib/inboxready --backup-dir /var/backups/inboxready --min-free-bytes 1073741824 --min-free-percent 10 --max-backup-age 129600 --readiness-timeout 5 --backup-timeout 30
 TimeoutStartSec=2min
 Nice=10
 IOSchedulingClass=idle
