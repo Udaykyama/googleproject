@@ -554,7 +554,9 @@ def test_the_queue_does_not_survive_a_restart_in_memory_mode():
         },
     )
     second = create_app(settings).test_client()
-    assert "r2" not in second.get("/queue").get_data(as_text=True)
+    page = second.get("/queue").get_data(as_text=True)
+    assert "The queue is empty." in page
+    assert "<code>r2</code>" not in page
 
 
 # -- configuration -------------------------------------------------------
