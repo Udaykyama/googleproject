@@ -1,0 +1,13 @@
+[Unit]
+Description=Create and verify an InboxReady SQLite backup
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/opt/inboxready/compose.yaml
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/inboxready
+ExecStart=/usr/bin/docker compose exec -T app fake-review-detector backup --database /var/lib/inboxready/moderation.sqlite3 --output-dir /var/backups/inboxready --keep 14
+TimeoutStartSec=45min
+Nice=10
+IOSchedulingClass=idle

@@ -44,7 +44,7 @@ CSRF_RE = re.compile(r'name="csrf_token" value="([^"]+)"')
 
 
 def config(**overrides) -> AppConfig:
-    settings = {"secret_key": "test-key-not-a-secret"}
+    settings = {"secret_key": "test-key-not-a-secret-32-characters"}
     settings.update(overrides)
     return AppConfig(**settings)
 

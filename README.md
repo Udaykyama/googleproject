@@ -616,97 +616,48 @@ All are environment variables. The defaults are the safe ones.
 
 ### Deploying it: read this part
 
-The interesting constraints are not hypothetical.
+The supported production foundation is intentionally specific: **one Linux
+VPS**, one Docker Compose app service with multiple Gunicorn workers, SQLite on
+a persistent local disk, and private HTTPS through Tailscale Serve. The
+container publishes to `127.0.0.1` only. Tailscale tailnet membership and policy
+are the external identity boundary; this application does not add logins.
 
-**Choose persistence explicitly.** Audit history must survive process restarts,
-and concurrent workers must not overwrite each other's queue:
+The complete fresh-host setup, Tailscale/firewall lockout precautions, daily
+systemd backup schedule, and tested restore procedure are in
+[the private VPS runbook](docs/vps-deployment.md).
 
-- `STORAGE=memory` (the default) writes nothing. The queue is lost on restart
-  and different workers have different queues. This is a local demonstration,
-  not a shared moderation service.
-- `STORAGE=file` preserves the legacy `queue.json` and anchored
-  `decisions.jsonl` files. It needs a persistent volume and **exactly one
-  writer**, including CLI access. Separate workers or simultaneous CLI/web
-  writes are not safe.
-- `STORAGE=sqlite` writes `DATA_DIR/moderation.sqlite3`. WAL mode, short
-  transactions, indexed queue reads, and atomic claims support multiple
-  processes on **one host**. Queue changes, decision records, and the audit
-  head commit together; failed writes roll back. Every worker needs the same
-  `DATA_DIR` and `SECRET_KEY`.
+The deployment files fail closed:
 
-SQLite must live on a persistent **local** filesystem, not NFS or a shared
-network volume. It is not horizontal multi-host scaling, and ephemeral
-serverless disks are not durable storage. For multi-host deployment, use a
-server database and a shared job service instead.
+- Compose requires operator-supplied data and backup paths plus a stable,
+  uncommitted `SECRET_KEY` of at least 32 characters.
+- The image installs the existing `server` and `dns` extras from pinned runtime
+  requirements, runs as a non-root user, and uses packaged application assets
+  rather than the source checkout.
+- `/healthz` is liveness; `/readyz` also checks SQLite accessibility. Compose
+  uses readiness, graceful Gunicorn shutdown, a read-only root filesystem,
+  dropped capabilities, `no-new-privileges`, and bounded/rotated runtime
+  resources.
+- `fake-review-detector backup` uses SQLite's live backup API, verifies database
+  integrity and the audit chain before atomic publication, and applies bounded
+  retention. A failed or unverifiable partial is never reported as a backup.
 
-Switching to SQLite does not import or delete existing JSON files. Keep
-`STORAGE=file` for existing queue state until an explicit data migration is
-planned; rescoring the original reviews into SQLite does not migrate human
-claims or outcomes.
+The boundaries remain important:
 
-The SQLite audit head lives in the same transaction as the records. It detects
-inconsistent edits or truncation, **not** someone rewriting or rolling back
-the entire database and its head together. Keep independently administered
-backups/checkpoints for that threat. Queue pages show counts without scanning
-all historical decisions; use **Check audit integrity** or the CLI `verify`
-command for a full, streaming scan.
+- `memory` is an ephemeral development/demo mode. Legacy `file` mode is a
+  single-writer mode. The Compose deployment always uses `sqlite`.
+- SQLite supports multiple workers on **one host** only and must be on a local
+  filesystem. The VPS and local disk are single points of failure.
+- Switching to SQLite does **not** migrate or delete legacy JSON queue/audit
+  state. Migration is a separate operator project.
+- Local backups are not disaster recovery. Independently administered,
+  encrypted off-host copies and retention are still required and deliberately
+  left to the operator.
+- `LIVE_DNS=0` remains the default. Enabling it lets every authorized tailnet
+  member query arbitrary domains; shared rate limits, query budgets, deadlines,
+  and bounded admission reduce abuse but do not make public exposure safe.
+- Production secrets, SQLite files, review data, uploaded mail, and backups do
+  not belong in git.
 
-**Live DNS is a free scanning service** for anyone who finds the URL. It is off
-unless you set `LIVE_DNS=1`. When on, each client gets a token bucket and each
-audit gets a hard query budget and a wall-clock deadline. Admission to the
-audit pool is bounded: HTTP 503 means it is full, HTTP 504 means the deadline
-expired, and HTTP 429 includes a retry delay for a rate limit. Expired audits
-cancel subsequent DNS work, and each outstanding lookup is timeout-bounded.
-SQLite mode shares rate-limit buckets across workers and restarts; memory/file
-mode limits are per process. The tool makes no outbound HTTP requests.
-
-**Uploads may be someone's real mail.** They are size-capped before the body is
-read, processed in memory, never written to disk, and never logged.
-
-**There is no authentication.** Anyone who can reach the app can work the
-queue. Moderator names are attribution labels, not authenticated ownership.
-Bind to loopback and put an identity-aware HTTPS proxy in front of any shared
-deployment. Only set `TRUSTED_PROXY_HOPS` to the actual trusted proxy count.
-
-### Where to run it
-
-| Option | Storage | Notes |
-| --- | --- | --- |
-| Locally | any | `python3 -m webui` for development only. |
-| One host with a persistent local volume | `sqlite` | Multiple WSGI workers share durable state and rate limits. |
-| One process with a persistent volume | `file` | Legacy operation; no concurrent CLI writer. |
-| Ephemeral/serverless instances | `memory` only | Demo only: each process has its own disposable queue. |
-| A static page of pre-generated fixture output | none | Zero cost, zero attack surface, if the point is only to show the work. |
-
-For the supported multi-worker deployment:
-
-```bash
-python -m pip install '.[server,dns]'
-export STORAGE=sqlite
-export DATA_DIR="$PWD/.local-data" # use your mounted persistent directory in production
-export SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-gunicorn --bind 127.0.0.1:8000 --workers 2 --threads 4 --timeout 60 'webui:create_app()'
-```
-
-Generate the key once and save it in your deployment's secret store; do not
-regenerate it on every restart. `/healthz` is process liveness; `/readyz` also
-checks that moderation storage is accessible and returns HTTP 503 if it is not.
-Keep the WSGI timeout above `AUDIT_DEADLINE` and `SQLITE_TIMEOUT`. Gunicorn is
-for Unix-like servers; both CLIs and the development UI remain portable.
-
-Back up a live SQLite database through SQLite's backup API, **not** by copying
-only the `.sqlite3` file while its WAL is active:
-
-```bash
-python - <<'PY'
-import os
-import sqlite3
-from pathlib import Path
-
-source = Path(os.environ["DATA_DIR"]).resolve() / "moderation.sqlite3"
-with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as db:
-    with sqlite3.connect("moderation-backup.sqlite3") as backup:
-        db.backup(backup)
-PY
-fake-review-detector verify --database moderation-backup.sqlite3 --require-anchor
-```
+For local development, `python3 -m webui` and the `memory`/`file` modes are
+unchanged. Both original CLIs remain dependency-free core imports; Gunicorn,
+Flask, and dnspython are still optional extras.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the InboxReady SQLite backup daily
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=30min
+Persistent=true
+Unit=inboxready-backup.service
+
+[Install]
+WantedBy=timers.target

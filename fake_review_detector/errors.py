@@ -19,6 +19,7 @@ __all__ = [
     "AuditLogError",
     "StorageError",
     "StorageBusyError",
+    "BackupError",
 ]
 
 
@@ -61,3 +62,7 @@ class StorageError(ModerationError):
 
 class StorageBusyError(StorageError):
     """A concurrent writer did not release storage before the lock timeout."""
+
+
+class BackupError(StorageError):
+    """A durable database backup could not be created or verified."""

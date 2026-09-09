@@ -161,7 +161,7 @@ jobs:
           cat /tmp/webui.log
           exit 1
         env:
-          SECRET_KEY: ci-smoke-test-not-a-real-secret
+          SECRET_KEY: ci-smoke-test-not-a-real-secret-key
           STORAGE: sqlite
           DATA_DIR: /tmp/webui-data
 
@@ -228,3 +228,80 @@ jobs:
         run: |
           if [ -f /tmp/webui.pid ]; then kill "$(cat /tmp/webui.pid)" || true; fi
           cat /tmp/webui.log || true
+
+  deployment-smoke:
+    # Exercise the same image, Compose file, hardening, readiness, and backup
+    # command an operator will use on a fresh VPS.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Required production settings must fail closed
+        run: |
+          if env -u SECRET_KEY -u APP_DATA_DIR -u BACKUP_DIR \
+              docker compose config --quiet; then
+            echo "::error::Compose accepted missing production settings"
+            exit 1
+          fi
+
+      - name: Prepare smoke-only persistent paths
+        run: |
+          sudo install -d -o 10001 -g 10001 -m 0700 \
+            /tmp/inboxready-data /tmp/inboxready-backups
+          install -m 0600 /dev/null /tmp/inboxready.env
+          cat > /tmp/inboxready.env <<'EOF'
+          APP_DATA_DIR=/tmp/inboxready-data
+          BACKUP_DIR=/tmp/inboxready-backups
+          SECRET_KEY=ci-deployment-smoke-only-not-a-production-secret
+          APP_PORT=8000
+          GUNICORN_WORKERS=2
+          GUNICORN_THREADS=2
+          LIVE_DNS=0
+          EOF
+
+      - name: Render the production Compose model
+        run: |
+          docker compose --env-file /tmp/inboxready.env config --quiet
+          docker compose --env-file /tmp/inboxready.env config \
+            > /tmp/inboxready-compose.yaml
+          grep -q "host_ip: 127.0.0.1" /tmp/inboxready-compose.yaml
+          grep -q "read_only: true" /tmp/inboxready-compose.yaml
+          grep -q "no-new-privileges:true" /tmp/inboxready-compose.yaml
+
+      - name: Build the production image
+        run: docker compose --env-file /tmp/inboxready.env build --pull
+
+      - name: Image must be installed, non-root, and keep both CLIs
+        run: |
+          docker run --rm --entrypoint python inboxready:local -c "
+          import importlib.resources, os
+          from pathlib import Path
+          assert os.getuid() == 10001
+          assert (importlib.resources.files('webui') / 'templates' / 'index.html').is_file()
+          assert not Path('/opt/inboxready/pyproject.toml').exists()
+          "
+          docker run --rm --entrypoint inboxready inboxready:local --help
+          docker run --rm --entrypoint fake-review-detector inboxready:local --help
+
+      - name: Start and back up the hardened service
+        run: |
+          docker compose --env-file /tmp/inboxready.env up -d --wait
+          curl -fsS http://127.0.0.1:8000/readyz
+          docker compose --env-file /tmp/inboxready.env exec -T app \
+            fake-review-detector backup \
+              --database /var/lib/inboxready/moderation.sqlite3 \
+              --output-dir /var/backups/inboxready \
+              --keep 2
+          backup=$(sudo find /tmp/inboxready-backups -maxdepth 1 -type f \
+            -name 'moderation-*.sqlite3' -print -quit)
+          test -n "$backup"
+          docker compose --env-file /tmp/inboxready.env exec -T app \
+            fake-review-detector verify \
+              --database "/var/backups/inboxready/$(basename "$backup")" \
+              --integrity --require-anchor
+
+      - name: Stop the deployment
+        if: always()
+        run: |
+          docker compose --env-file /tmp/inboxready.env logs || true
+          docker compose --env-file /tmp/inboxready.env down || true

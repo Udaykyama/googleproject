@@ -48,9 +48,18 @@ def test_sqlite_requires_both_a_directory_and_stable_secret(tmp_path):
         AppConfig.from_env({"STORAGE": "sqlite", "DATA_DIR": str(tmp_path)})
     settings = AppConfig.from_env({
         "STORAGE": "sqlite", "DATA_DIR": str(tmp_path),
-        "SECRET_KEY": "stable-test-key",
+        "SECRET_KEY": "stable-test-key-at-least-32-characters",
     })
     assert settings.persistent and settings.storage == "sqlite"
+
+
+def test_sqlite_rejects_a_short_secret(tmp_path):
+    with pytest.raises(ConfigError, match="at least 32"):
+        AppConfig.from_env({
+            "STORAGE": "sqlite",
+            "DATA_DIR": str(tmp_path),
+            "SECRET_KEY": "short-but-stable",
+        })
 
 
 @pytest.mark.parametrize("name", ["DNS_TIMEOUT", "AUDIT_DEADLINE", "SQLITE_TIMEOUT"])

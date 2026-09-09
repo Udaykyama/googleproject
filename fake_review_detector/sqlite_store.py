@@ -373,6 +373,18 @@ class SQLiteStore:
         except AuditLogError as exc:
             return ChainStatus(valid=False, records=0, reason=str(exc))
 
+    def check_integrity(self) -> None:
+        """Run SQLite's full structural integrity check."""
+
+        with self.transaction() as connection:
+            results = [
+                str(row[0])
+                for row in connection.execute("PRAGMA integrity_check").fetchall()
+            ]
+        if results != ["ok"]:
+            detail = "; ".join(results[:3]) or "no result"
+            raise StorageError(f"SQLite integrity check failed: {detail}")
+
     def healthcheck(self) -> None:
         """Check the schema is readable without scanning the decision history."""
 
