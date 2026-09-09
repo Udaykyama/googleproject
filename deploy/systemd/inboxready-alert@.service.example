@@ -1,0 +1,10 @@
+[Unit]
+Description=Notify the operator that %i.service failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/inboxready-notify %i.service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

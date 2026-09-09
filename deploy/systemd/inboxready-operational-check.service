@@ -1,0 +1,16 @@
+[Unit]
+Description=Check InboxReady readiness, disk headroom, and verified backups
+Requires=docker.service
+After=docker.service
+AssertPathExists=/opt/inboxready/compose.yaml
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/inboxready
+ExecStart=/usr/bin/docker compose run --rm --no-deps -T app fake-review-detector operational-check --readiness-url http://app:8000/readyz --data-dir /var/lib/inboxready --backup-dir /var/backups/inboxready --min-free-bytes 1073741824 --min-free-percent 10 --max-backup-age 129600 --readiness-timeout 5 --backup-timeout 30
+TimeoutStartSec=2min
+Nice=10
+IOSchedulingClass=idle
+
+# Add OnFailure=inboxready-alert@%p.service in a [Unit] drop-in only after
+# installing and testing an operator-owned notifier. See docs/vps-deployment.md.

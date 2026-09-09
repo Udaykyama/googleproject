@@ -20,7 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] in {"-h", "--help"}:
         print(__doc__)
         print(
-            "Environment: LIVE_DNS, STORAGE, DATA_DIR, SECRET_KEY, HOST, PORT.\n"
+            "Environment: LIVE_DNS, STORAGE, DATA_DIR, SECRET_KEY, LOG_FORMAT, "
+            "LOG_LEVEL, LOG_CLIENT_ADDRESS, HOST, PORT.\n"
             "See the 'Web UI' section of README.md."
         )
         return 0
@@ -54,7 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         app = create_app(config)
     except (ModerationError, OSError) as exc:
-        print(f"webui: cannot initialize storage: {exc}", file=sys.stderr)
+        print(
+            f"webui: cannot initialize storage ({type(exc).__name__})",
+            file=sys.stderr,
+        )
         return 2
 
     print(f"webui: DNS mode      {'live' if config.live_dns else 'demo fixtures only'}")

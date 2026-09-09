@@ -612,6 +612,9 @@ All are environment variables. The defaults are the safe ones.
 | `RATE_LIMIT_PER_MINUTE` | `6` | Live-DNS audits per client per minute. |
 | `RATE_LIMIT_BURST` | `3` | How many of those may arrive at once. |
 | `TRUSTED_PROXY_HOPS` | `0` | Reverse proxies in front of the app. Leave at 0 unless there really are some. |
+| `LOG_FORMAT` | `text` | `text` for readable development output or `json` for structured production events. Compose selects `json`. |
+| `LOG_LEVEL` | `INFO` | Minimum application event severity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
+| `LOG_CLIENT_ADDRESS` | `0` | Include one normalized client IP after trusted-proxy processing. Raw forwarding chains are never logged. |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | Where `python3 -m webui` listens. |
 
 ### Deploying it: read this part
@@ -623,8 +626,10 @@ container publishes to `127.0.0.1` only. Tailscale tailnet membership and policy
 are the external identity boundary; this application does not add logins.
 
 The complete fresh-host setup, Tailscale/firewall lockout precautions, daily
-systemd backup schedule, and tested restore procedure are in
-[the private VPS runbook](docs/vps-deployment.md).
+systemd backup and operational-check schedules, and tested restore procedure
+are in [the private VPS runbook](docs/vps-deployment.md). Diagnosis, rollback,
+evidence handling, and escalation are in the
+[incident operations runbook](docs/incident-operations.md).
 
 The deployment files fail closed:
 
@@ -640,6 +645,14 @@ The deployment files fail closed:
 - `fake-review-detector backup` uses SQLite's live backup API, verifies database
   integrity and the audit chain before atomic publication, and applies bounded
   retention. A failed or unverifiable partial is never reported as a backup.
+- Production request events are structured, correlated with a safe
+  `X-Request-ID`, and omit raw URLs, query strings, submitted content, secrets,
+  forwarding chains, and exception messages. Docker retains at most five
+  10 MiB log files.
+- `fake-review-detector operational-check` provides timer-friendly JSON and
+  deterministic exit status for local readiness, data-disk headroom, backup
+  age, and full verification of the latest finalized backup. No public metrics
+  endpoint or per-worker in-memory counters are added.
 
 The boundaries remain important:
 

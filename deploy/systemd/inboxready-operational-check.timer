@@ -1,0 +1,12 @@
+[Unit]
+Description=Check InboxReady operations every six hours
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15min
+AccuracySec=1min
+Unit=inboxready-operational-check.service
+
+[Install]
+WantedBy=timers.target
