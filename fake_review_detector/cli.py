@@ -7,6 +7,8 @@ Subcommands map to the operational tasks the system exists to support::
     python -m fake_review_detector.cli queue    --list
     python -m fake_review_detector.cli verify   --audit-log audit.jsonl
     python -m fake_review_detector.cli replay   data/sample_reviews.json
+    python -m fake_review_detector.cli backup   --database moderation.sqlite3 \
+        --output-dir backups
 
 Invoking with a bare file path still works and runs ``score``, so the original
 one-argument usage is unchanged.
@@ -20,6 +22,7 @@ import sys
 from pathlib import Path
 
 from .audit import AuditLog, replay
+from .backup import backup_database
 from .calibration import OBJECTIVES, calibrate, precision_at_prevalence
 from .engine import moderate_batch
 from .errors import ModerationError, PolicyError, ValidationError
@@ -285,6 +288,12 @@ def _open_log(args: argparse.Namespace) -> AuditLog | SQLiteStore:
 def _cmd_verify(args: argparse.Namespace) -> int:
     log = _open_log(args)
 
+    if args.integrity:
+        if not isinstance(log, SQLiteStore):
+            raise ModerationError("--integrity requires --database")
+        log.check_integrity()
+        print("SQLite integrity check passed")
+
     if args.re_anchor and isinstance(log, AuditLog):
         anchor = log.write_anchor()
         print(f"anchored {anchor.records} record(s) at {anchor.head_hash}")
@@ -313,6 +322,20 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return 1 if differences else 0
 
 
+def _cmd_backup(args: argparse.Namespace) -> int:
+    result = backup_database(
+        args.database,
+        args.output_dir,
+        keep=args.keep,
+        timeout=args.timeout,
+    )
+    print(
+        f"verified backup: {result.path} "
+        f"({result.records} audit record(s), {len(result.removed)} expired removed)"
+    )
+    return 0
+
+
 def _positive_int(raw: str) -> int:
     value = int(raw)
     if value < 1:
@@ -324,6 +347,16 @@ def _nonnegative_int(raw: str) -> int:
     value = int(raw)
     if value < 0:
         raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return value
+
+
+def _positive_float(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a number") from None
+    if not 0 < value < float("inf"):
+        raise argparse.ArgumentTypeError("must be finite and greater than zero")
     return value
 
 
@@ -437,6 +470,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fail when no anchor exists, instead of reporting the truncation "
         "check as not performed.",
     )
+    verify.add_argument(
+        "--integrity",
+        action="store_true",
+        help="Also run SQLite's full integrity check; requires --database.",
+    )
     verify.set_defaults(func=_cmd_verify)
 
     replay_parser = subparsers.add_parser(
@@ -452,6 +490,33 @@ def build_parser() -> argparse.ArgumentParser:
     replay_parser.add_argument("--policy", type=Path)
     replay_parser.add_argument("--json", action="store_true")
     replay_parser.set_defaults(func=_cmd_replay)
+
+    backup_parser = subparsers.add_parser(
+        "backup",
+        help="Create and audit-verify an atomic live SQLite backup.",
+    )
+    backup_parser.add_argument(
+        "--database", type=Path, required=True, help="Live moderation SQLite database."
+    )
+    backup_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Existing persistent directory for timestamped backups.",
+    )
+    backup_parser.add_argument(
+        "--keep",
+        type=_positive_int,
+        default=14,
+        help="Number of timestamped backups to retain (default: 14).",
+    )
+    backup_parser.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=30.0,
+        help="SQLite lock timeout in seconds (default: 30).",
+    )
+    backup_parser.set_defaults(func=_cmd_backup)
 
     #: Read back off the subparsers so the bare-path compatibility shim in
     #: main() cannot drift out of sync when a subcommand is added.

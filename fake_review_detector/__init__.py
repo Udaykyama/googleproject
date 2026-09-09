@@ -17,11 +17,12 @@ the original scoring-only API.
 """
 
 from .audit import AuditLog, replay
+from .backup import BackupResult, backup_database
 from .detector import score_review, score_reviews
 from .engine import BatchResult, moderate, moderate_batch, score_batch
 from .errors import (
-    AuditLogError, ModerationError, PolicyError, StorageBusyError, StorageError,
-    ValidationError,
+    AuditLogError, BackupError, ModerationError, PolicyError, StorageBusyError,
+    StorageError, ValidationError,
 )
 from .evaluation import Metrics, evaluate, threshold_sweep
 from .models import (
@@ -68,6 +69,8 @@ __all__ = [
     "Outcome",
     "AuditLog",
     "replay",
+    "backup_database",
+    "BackupResult",
     # Measurement
     "evaluate",
     "threshold_sweep",
@@ -79,6 +82,7 @@ __all__ = [
     "AuditLogError",
     "StorageError",
     "StorageBusyError",
+    "BackupError",
     # Original API
     "score_review",
     "score_reviews",

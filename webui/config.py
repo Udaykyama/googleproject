@@ -48,6 +48,7 @@ __all__ = ["AppConfig", "ConfigError", "MEMORY", "FILE", "SQLITE"]
 MEMORY = "memory"
 FILE = "file"
 SQLITE = "sqlite"
+_MIN_SQLITE_SECRET_LENGTH = 32
 
 #: Where the repository's demo assets live when running from a checkout.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -148,6 +149,11 @@ class AppConfig:
             raise ConfigError(f"STORAGE={self.storage} requires DATA_DIR")
         if not isinstance(self.secret_key, str) or not self.secret_key.strip():
             raise ConfigError("SECRET_KEY must be a non-empty string")
+        if self.storage == SQLITE and len(self.secret_key) < _MIN_SQLITE_SECRET_LENGTH:
+            raise ConfigError(
+                f"STORAGE=sqlite requires SECRET_KEY to be at least "
+                f"{_MIN_SQLITE_SECRET_LENGTH} characters"
+            )
         for name in (
             "max_upload_bytes", "max_reviews", "dns_query_budget", "audit_workers",
             "queue_page_size", "rate_limit_per_minute", "rate_limit_burst",

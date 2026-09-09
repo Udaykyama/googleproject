@@ -1,0 +1,3 @@
+# Build-only tools for the container's application wheel.
+setuptools==82.0.1
+wheel==0.45.1

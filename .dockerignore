@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.pytest_cache
+.local-data
+.env
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+tests
+docs
+deploy

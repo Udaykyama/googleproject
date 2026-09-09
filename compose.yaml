@@ -1,0 +1,70 @@
+name: inboxready
+
+services:
+  app:
+    image: inboxready:local
+    build:
+      context: .
+      target: runtime
+    command:
+      - gunicorn
+      - --bind=0.0.0.0:8000
+      - --workers=${GUNICORN_WORKERS:-2}
+      - --threads=${GUNICORN_THREADS:-4}
+      - --timeout=60
+      - --graceful-timeout=35
+      - --access-logfile=-
+      - --error-logfile=-
+      - --capture-output
+      - webui:create_app()
+    environment:
+      STORAGE: sqlite
+      DATA_DIR: /var/lib/inboxready
+      SECRET_KEY: "${SECRET_KEY:?Set SECRET_KEY to a stable value of at least 32 characters}"
+      LIVE_DNS: "${LIVE_DNS:-0}"
+      TRUSTED_PROXY_HOPS: "1"
+    ports:
+      - name: http
+        target: 8000
+        published: "${APP_PORT:-8000}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: "${APP_DATA_DIR:?Set APP_DATA_DIR to an existing persistent local directory}"
+        target: /var/lib/inboxready
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${BACKUP_DIR:?Set BACKUP_DIR to an existing persistent backup directory}"
+        target: /var/backups/inboxready
+        bind:
+          create_host_path: false
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 50s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16777216,mode=1777
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3).close()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
