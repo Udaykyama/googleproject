@@ -1,0 +1,81 @@
+#!/bin/sh
+
+set -eu
+
+usage() {
+    echo "usage: $0 [--env-file PATH] {config|pull|deploy}" >&2
+    exit 2
+}
+
+fail() {
+    echo "production-compose: $*" >&2
+    exit 1
+}
+
+env_file=/etc/inboxready/app.env
+if [ "${1:-}" = "--env-file" ]; then
+    [ "$#" -ge 3 ] || usage
+    env_file=$2
+    shift 2
+fi
+
+[ "$#" -eq 1 ] || usage
+action=$1
+case "$action" in
+    config|pull|deploy) ;;
+    *) usage ;;
+esac
+
+case "$env_file" in
+    /*) ;;
+    *) fail "environment file path must be absolute" ;;
+esac
+[ -r "$env_file" ] || fail "environment file is not readable: $env_file"
+
+unset \
+    APP_IMAGE APP_DATA_DIR BACKUP_DIR SECRET_KEY APP_PORT \
+    GUNICORN_WORKERS GUNICORN_THREADS LIVE_DNS LOG_FORMAT LOG_LEVEL \
+    LOG_CLIENT_ADDRESS APP_ENV_FILE COMPOSE_FILE COMPOSE_PROJECT_NAME \
+    COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE \
+    COMPOSE_PATH_SEPARATOR
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+
+compose() {
+    docker compose \
+        --project-name inboxready \
+        --file "$repo_root/compose.yaml" \
+        --env-file "$env_file" \
+        "$@"
+}
+
+compose config --quiet
+image=$(compose config --images)
+
+image_count=$(printf '%s\n' "$image" | awk 'NF { count++ } END { print count + 0 }')
+[ "$image_count" -eq 1 ] ||
+    fail "Compose must render exactly one application image"
+
+if ! printf '%s\n' "$image" |
+    LC_ALL=C grep -Eq '^ghcr\.io/udaykyama/googleproject@sha256:[0-9a-f]{64}$'
+then
+    fail "APP_IMAGE must be ghcr.io/udaykyama/googleproject@sha256:<64 lowercase hex characters>"
+fi
+
+printf 'approved image: %s\n' "$image"
+[ "$action" = "config" ] && exit 0
+
+compose pull --policy always app
+repo_digests=$(
+    docker image inspect \
+        --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+        "$image"
+)
+if ! printf '%s\n' "$repo_digests" | grep -Fqx -- "$image"; then
+    fail "Docker did not record the approved digest after pulling $image"
+fi
+
+[ "$action" = "pull" ] && exit 0
+
+compose up -d --no-build --pull never --wait app

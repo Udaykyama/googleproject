@@ -5,33 +5,57 @@ from `compose.yaml`, multiple Gunicorn workers, SQLite on local persistent disk,
 loopback-only publication, and private access through Tailscale Serve. Tailnet
 membership is the identity boundary; the application has no login.
 
-Do not paste `.env`, SQLite files, backups, uploaded content, review bodies,
-session/CSRF values, or full container inspection output into an incident
-ticket. Do not run `tailscale funnel`, delete SQLite sidecars, re-anchor an
-unverified audit chain, or use broad Docker cleanup during diagnosis.
+Do not paste `/etc/inboxready/app.env`, SQLite files, backups, uploaded
+content, review bodies, session/CSRF values, or full container inspection
+output into an incident ticket. Do not run `tailscale funnel`, delete SQLite
+sidecars, re-anchor an unverified audit chain, or use broad Docker cleanup
+during diagnosis.
 
 ## First response
 
-Work from the reviewed checkout and record UTC times:
+Work from the reviewed checkout, set the protected environment path once in
+an initial root incident shell, and record UTC times. From a sudo-capable
+administrator session, enter it explicitly:
+
+```bash
+sudo -i
+```
+
+Do not use the non-sudo deployment account as the incident shell; the helper
+below deliberately runs Docker as that account:
 
 ```bash
 cd /opt/inboxready
+APP_ENV_FILE=/etc/inboxready/app.env
+compose() (
+  unset \
+    APP_IMAGE APP_DATA_DIR BACKUP_DIR SECRET_KEY APP_PORT \
+    GUNICORN_WORKERS GUNICORN_THREADS LIVE_DNS LOG_FORMAT LOG_LEVEL \
+    LOG_CLIENT_ADDRESS COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES \
+    COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE COMPOSE_PATH_SEPARATOR
+  sudo -H -u inboxready-deploy \
+    docker compose --project-name inboxready \
+    --file /opt/inboxready/compose.yaml \
+    --env-file "$APP_ENV_FILE" "$@"
+)
 date -u
-docker compose ps --all
+compose ps --all
 curl -fsS http://127.0.0.1:8000/healthz
 curl -fsS http://127.0.0.1:8000/readyz
 sudo systemctl status \
   inboxready-backup.service \
   inboxready-operational-check.service \
   --no-pager
-docker compose logs --since 30m --tail 500 --no-color app
+compose \
+  logs --since 30m --tail 500 --no-color app
 ```
 
 Run the same read-only check used by the timer. It emits one JSON document and
 returns nonzero if any condition fails:
 
 ```bash
-docker compose run --rm --no-deps -T app \
+compose \
+  run --pull never --rm --no-deps -T app \
   fake-review-detector operational-check \
     --readiness-url http://app:8000/readyz \
     --data-dir /var/lib/inboxready \
@@ -55,14 +79,18 @@ SQLite or its transactional audit anchor. Both failing suggests the process or
 container is unavailable.
 
 ```bash
-docker compose ps --all
-APP_CONTAINER=$(docker compose ps --all -q app)
+compose ps --all
+APP_CONTAINER=$(
+  compose ps --all -q app
+)
 if test -n "$APP_CONTAINER"; then
-  docker inspect --format '{{json .State}}' "$APP_CONTAINER"
+  sudo -H -u inboxready-deploy \
+    docker inspect --format '{{json .State}}' "$APP_CONTAINER"
 else
   echo "No app container has been created."
 fi
-docker compose logs --since 15m --tail 500 --no-color app
+compose \
+  logs --since 15m --tail 500 --no-color app
 sudo journalctl -u inboxready-operational-check.service \
   --since '-1 hour' --no-pager
 ```
@@ -72,7 +100,8 @@ not exception text or storage paths. Correlate a reported request using its
 bounded ID:
 
 ```bash
-docker compose logs --since 1h --tail 1000 --no-color app \
+compose \
+  logs --since 1h --tail 1000 --no-color app \
   | grep --fixed-string '"request_id":"REPORTED_REQUEST_ID"'
 ```
 
@@ -81,8 +110,9 @@ first. If both are healthy and the failure was transient, make one controlled
 restart and re-run readiness:
 
 ```bash
-docker compose restart app
-docker compose up -d --wait app
+compose restart app
+compose \
+  up -d --no-build --pull never --wait app
 curl -fsS http://127.0.0.1:8000/readyz
 ```
 
@@ -92,25 +122,31 @@ Inspect the state and recent lifecycle output without dumping the container
 environment, which contains `SECRET_KEY`:
 
 ```bash
-docker compose ps --all
-APP_CONTAINER=$(docker compose ps --all -q app)
+compose ps --all
+APP_CONTAINER=$(
+  compose ps --all -q app
+)
 if test -n "$APP_CONTAINER"; then
-  docker inspect --format \
+  sudo -H -u inboxready-deploy docker inspect --format \
     'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' \
     "$APP_CONTAINER"
 else
   echo "No app container has been created."
 fi
-docker compose logs --since 30m --tail 500 --no-color app
-docker image inspect inboxready:local --format '{{.Id}} {{.Created}}'
+compose \
+  logs --since 30m --tail 500 --no-color app
+APP_IMAGE=$(compose config --images)
+sudo -H -u inboxready-deploy \
+  docker image inspect "$APP_IMAGE" --format '{{.Id}} {{.Created}}'
 ```
 
 If restarts obscure the first error, stop the service once, preserve evidence,
 and run it attached:
 
 ```bash
-docker compose stop app
-docker compose up app
+compose stop app
+compose \
+  up --no-build --pull never app
 ```
 
 Use `Ctrl-C` after capturing the failure, then either roll back to a known image
@@ -125,7 +161,7 @@ Confirm which local filesystem is constrained and whether usage is increasing:
 df -h /srv/inboxready/data /srv/inboxready/backups
 df -i /srv/inboxready/data /srv/inboxready/backups
 sudo du -x -h --max-depth=1 /srv/inboxready
-docker system df
+sudo -H -u inboxready-deploy docker system df
 ```
 
 Do not delete `moderation.sqlite3`, `-wal`, or `-shm`, partial files during an
@@ -161,7 +197,8 @@ SQLite/audit API:
 BACKUP_NAME=$(sudo find /srv/inboxready/backups -maxdepth 1 -type f \
   -name 'moderation-*.sqlite3' -printf '%f\n' | LC_ALL=C sort | tail -n 1)
 test -n "$BACKUP_NAME"
-docker compose run --rm --no-deps -T app \
+compose \
+  run --pull never --rm --no-deps -T app \
   fake-review-detector verify \
     --database "/var/backups/inboxready/$BACKUP_NAME" \
     --integrity --require-anchor
@@ -180,15 +217,16 @@ writer, exhausted I/O, or another stack using the same database. Confirm only
 the intended Compose project is running and inspect its processes:
 
 ```bash
-docker compose ps --all
-docker compose top app
-docker ps --filter label=com.docker.compose.project=inboxready
+compose ps --all
+compose top app
+sudo -H -u inboxready-deploy \
+  docker ps --filter label=com.docker.compose.project=inboxready
 ```
 
 Then run the established verifier against the live database:
 
 ```bash
-docker compose exec -T app \
+compose exec -T app \
   fake-review-detector verify \
     --database /var/lib/inboxready/moderation.sqlite3 \
     --integrity --require-anchor
@@ -221,37 +259,45 @@ precautions in [the deployment runbook](vps-deployment.md).
 ## Safe rollback to a known image
 
 Rollback changes the image, never the data mounts. Use an operator-recorded,
-previously tested immutable image tag or digest and confirm it supports the
-current SQLite schema. Record the current image ID first:
+previously tested immutable digest and confirm it supports the current SQLite
+schema. Record the current reference and preserve the protected environment
+file first:
 
 ```bash
 cd /opt/inboxready
-CURRENT_IMAGE=$(docker image inspect inboxready:local --format '{{.Id}}')
-KNOWN_IMAGE=inboxready:release-KNOWN_GOOD
-docker image inspect "$KNOWN_IMAGE" --format '{{.Id}} {{.Created}}'
-
-docker compose stop app
-docker image tag "$KNOWN_IMAGE" inboxready:local
-docker compose up -d --no-build --wait app
+CURRENT_IMAGE=$(
+  compose config --images
+)
+printf 'current image: %s\n' "$CURRENT_IMAGE"
+sudo cp --preserve=mode,ownership "$APP_ENV_FILE" \
+  "$APP_ENV_FILE.pre-rollback"
+sudoedit "$APP_ENV_FILE"
+# Set APP_IMAGE=ghcr.io/udaykyama/googleproject@sha256:<known-good-digest>.
+sudo -H -u inboxready-deploy \
+  /opt/inboxready/deploy/production-compose \
+    --env-file "$APP_ENV_FILE" deploy
 curl -fsS http://127.0.0.1:8000/readyz
-docker compose exec -T app \
+compose exec -T app \
   fake-review-detector verify \
     --database /var/lib/inboxready/moderation.sqlite3 \
     --integrity --require-anchor
 ```
 
-If rollback validation fails, stop the app. The recorded ID can be retagged to
-return to the prior image:
+If rollback validation fails, restore the prior environment and redeploy its
+recorded digest:
 
 ```bash
-docker compose stop app
-docker image tag "$CURRENT_IMAGE" inboxready:local
-docker compose up -d --no-build --wait app
+sudo cp --preserve=mode,ownership "$APP_ENV_FILE.pre-rollback" "$APP_ENV_FILE"
+sudo -H -u inboxready-deploy \
+  /opt/inboxready/deploy/production-compose \
+    --env-file "$APP_ENV_FILE" deploy
 ```
 
-Do not rebuild during an incident and call it a rollback; a rebuild can resolve
-different dependencies or base layers. Do not roll back across an incompatible
-storage change without the corresponding tested data procedure.
+The production command pulls the exact digest and starts with
+`--no-build --pull never`. Do not rebuild during an incident and call it a
+rollback; a rebuild can resolve different dependencies or base layers. Do not
+roll back across an incompatible storage change without the corresponding
+tested data procedure.
 
 ## Verified restore drill
 
@@ -280,9 +326,12 @@ INCIDENT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/inboxready-incident.XXXXXX")
 date -u > "$INCIDENT_DIR/time.txt"
 git rev-parse HEAD > "$INCIDENT_DIR/revision.txt"
 docker compose version > "$INCIDENT_DIR/compose-version.txt"
-docker compose config --images > "$INCIDENT_DIR/images.txt"
-docker compose ps --all > "$INCIDENT_DIR/compose-ps.txt"
-docker compose logs --since 2h --tail 2000 --no-color app \
+compose config --images \
+  > "$INCIDENT_DIR/images.txt"
+compose ps --all \
+  > "$INCIDENT_DIR/compose-ps.txt"
+compose \
+  logs --since 2h --tail 2000 --no-color app \
   > "$INCIDENT_DIR/app.log"
 sudo journalctl \
   -u inboxready-backup.service \
@@ -295,9 +344,10 @@ tailscale serve status > "$INCIDENT_DIR/tailscale-serve.txt"
 
 Application logs are designed not to contain bodies, raw queries, cookies,
 tokens, or storage paths, but still treat the bundle as restricted operational
-data. Review it before transfer. Never collect `.env`, full `docker inspect`
-output, database/backup files, HTML responses, core dumps, or uploaded content
-unless an authorized evidence owner establishes a separate encrypted process.
+data. Review it before transfer. Never collect `/etc/inboxready/app.env`, full
+`docker inspect` output, database/backup files, HTML responses, core dumps, or
+uploaded content unless an authorized evidence owner establishes a separate
+encrypted process.
 
 ## Escalation and follow-up
 

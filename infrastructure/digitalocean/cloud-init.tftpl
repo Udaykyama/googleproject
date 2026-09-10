@@ -1,0 +1,64 @@
+#cloud-config
+
+timezone: UTC
+package_update: true
+package_upgrade: true
+ssh_pwauth: false
+disable_root: false
+
+groups:
+  - ${deployment_group}
+
+users:
+  - name: ${deployment_user}
+    gecos: InboxReady deployment account
+    primary_group: ${deployment_group}
+    lock_passwd: true
+    shell: /bin/bash
+
+packages:
+  - ca-certificates
+  - curl
+  - docker.io
+  - docker-compose-v2
+  - git
+  - jq
+  - openssl
+  - unattended-upgrades
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/60-inboxready-baseline.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitEmptyPasswords no
+      PermitRootLogin prohibit-password
+      X11Forwarding no
+      MaxAuthTries 4
+      LoginGraceTime 30
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root:root
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+
+runcmd:
+  - [systemctl, enable, --now, docker.service]
+  - [usermod, --append, --groups, docker, ${deployment_user}]
+  - [chmod, "0750", /home/${deployment_user}]
+  - [install, -d, -o, ${deployment_user}, -g, ${deployment_group}, -m, "0750", /opt/inboxready]
+  - [install, -d, -o, root, -g, ${deployment_group}, -m, "0750", /etc/inboxready]
+  - [install, -d, -o, root, -g, root, -m, "0755", /srv/inboxready]
+  - [install, -d, -o, "10001", -g, "10001", -m, "0700", /srv/inboxready/data]
+  - [install, -d, -o, "10001", -g, "10001", -m, "0700", /srv/inboxready/backups]
+  - [test, -s, /root/.ssh/authorized_keys]
+  - [install, -d, -o, ${deployment_user}, -g, ${deployment_group}, -m, "0700", /home/${deployment_user}/.ssh]
+  - [install, -o, ${deployment_user}, -g, ${deployment_group}, -m, "0600", /root/.ssh/authorized_keys, /home/${deployment_user}/.ssh/authorized_keys]
+  - [sshd, -t]
+  - [systemctl, reload, ssh.service]
+
+final_message: "InboxReady host prerequisites are installed. Tailscale, GHCR authentication, application secrets, and deployment remain explicit operator actions."

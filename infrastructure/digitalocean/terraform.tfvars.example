@@ -1,0 +1,21 @@
+# Copy outside the repository or to an ignored terraform.tfvars, then replace
+# every placeholder. Never put the DigitalOcean token in this file.
+name_prefix = "inboxready-production"
+region      = "nyc3"
+droplet_size = "s-1vcpu-2gb"
+
+ssh_key_ids_or_fingerprints = [
+  "REPLACE_WITH_EXISTING_DIGITALOCEAN_SSH_KEY_ID",
+]
+
+operator_ssh_cidrs = [
+  "203.0.113.10/32",
+]
+disable_public_ssh = false
+
+# Leave empty for the safer, simpler DERP-over-TCP-443 fallback. Add only
+# stable, explicitly bounded peer networks if direct UDP is necessary.
+tailscale_direct_peer_cidrs = []
+
+# Set true only immediately before the reviewed billable plan/apply.
+confirm_billable_resources = false

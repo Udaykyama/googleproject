@@ -1,0 +1,8 @@
+# OpenTofu needs the backend type in configuration. For an S3-compatible
+# backend, copy this file to the ignored backend_override.tf, keep credentials
+# in the backend's environment variables, and pass non-secret/account-specific
+# settings with -backend-config. Verify encryption, versioning, and locking
+# behavior with the chosen backend before the first apply.
+terraform {
+  backend "s3" {}
+}

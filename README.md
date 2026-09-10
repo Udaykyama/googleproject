@@ -625,16 +625,26 @@ a persistent local disk, and private HTTPS through Tailscale Serve. The
 container publishes to `127.0.0.1` only. Tailscale tailnet membership and policy
 are the external identity boundary; this application does not add logins.
 
-The complete fresh-host setup, Tailscale/firewall lockout precautions, daily
-systemd backup and operational-check schedules, and tested restore procedure
-are in [the private VPS runbook](docs/vps-deployment.md). Diagnosis, rollback,
-evidence handling, and escalation are in the
+The side-effect-free OpenTofu model, signed GHCR release path, DigitalOcean
+cost/firewall review, Tailscale enrollment, and immutable-digest delivery steps
+are in the
+[DigitalOcean provisioning runbook](docs/digitalocean-deployment.md). The
+provider-neutral backup, operational-check, and tested restore procedures are
+in [the private VPS runbook](docs/vps-deployment.md). Diagnosis, digest
+rollback, evidence handling, and escalation are in the
 [incident operations runbook](docs/incident-operations.md).
 
 The deployment files fail closed:
 
-- Compose requires operator-supplied data and backup paths plus a stable,
-  uncommitted `SECRET_KEY` of at least 32 characters.
+- Production Compose requires an operator-approved
+  `ghcr.io/udaykyama/googleproject@sha256:...` image, data and backup paths, and
+  a stable uncommitted `SECRET_KEY` of at least 32 characters. Its deployment
+  command pulls that digest and starts with `--no-build --pull never`; local
+  builds require the explicit `compose.local.yaml` override.
+- The release workflow accepts only a GitHub-verified signed annotated
+  `vMAJOR.MINOR.PATCH` tag matching the package version. It publishes semantic
+  and full-commit tags with OCI metadata, provenance, and an SBOM, then records
+  the immutable digest without redeploying production.
 - The image installs the existing `server` and `dns` extras from pinned runtime
   requirements, runs as a non-root user, and uses packaged application assets
   rather than the source checkout.
