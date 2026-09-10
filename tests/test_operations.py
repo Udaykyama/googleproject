@@ -64,7 +64,7 @@ def _ready(monkeypatch):
     _connection(monkeypatch)
 
 
-def _seed(tmp_path):
+def _seed(tmp_path, *, now=BACKUP_TIME):
     data_dir = tmp_path / "data"
     database = data_dir / "moderation.sqlite3"
     store = SQLiteStore(database)
@@ -79,7 +79,7 @@ def _seed(tmp_path):
     ])
     backup_dir = tmp_path / "backups"
     backup_dir.mkdir()
-    backup = backup_database(database, backup_dir, now=BACKUP_TIME)
+    backup = backup_database(database, backup_dir, now=now)
     return data_dir, backup_dir, backup.path
 
 
@@ -280,7 +280,7 @@ def test_cli_success_and_backup_timeout_are_wired(
     tmp_path, monkeypatch, capsys
 ):
     _ready(monkeypatch)
-    data_dir, backup_dir, _ = _seed(tmp_path)
+    data_dir, backup_dir, _ = _seed(tmp_path, now=datetime.now(UTC))
     observed = {}
 
     def verified(path, *, timeout):
